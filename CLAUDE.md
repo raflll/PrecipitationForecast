@@ -1,0 +1,1 @@
+I want you to memorize the structure of the repository, when you make scripts to do simple tasks put them in an appropriate folder in the scripts folder. When you code something that is for the main functionality of the repository and should be run when main is run, it should go into src. Always put data in the data folder, always put visualizations in the visualizations fodler.

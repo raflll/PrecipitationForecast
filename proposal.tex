@@ -1,0 +1,124 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{natbib}
+
+
+\begin{document}
+
+\begin{center}
+    {\LARGE \textbf{Probabilistic Precipitation Forecasting for Miami Using XGBoost with Distributional Regression}}\\[1.5em]
+    {\large Justin Bonner, Arian Djahed, Alex Morrow}\\[0.5em]
+    CSC542 -- Statistical Learning with Applications\\
+    University of Miami\\
+    Instructor: Vanessa Aguiar\\[0.5em]
+    Spring 2026
+\end{center}
+\vspace{1em}
+
+\section{Introduction}
+Accurate precipitation forecasting is a critical challenge in meteorology with significant implications for water resource management, agriculture, urban planning, and disaster preparedness. Miami, Florida presents a particularly interesting case study due to its subtropical climate.
+
+Traditional numerical weather prediction (NWP) models provide deterministic forecasts that become increasingly uncertain at extended time horizons. At a 35-day forecast horizon, deterministic predictions lose much of their skill, making probabilistic approaches essential. Rather than predicting a single precipitation value, probabilistic forecasting estimates the full probability distribution of possible outcomes, enabling better risk assessment and decision-making under uncertainty.
+
+Gradient boosting methods, particularly XGBoost, have demonstrated strong performance in weather prediction tasks. XGBoost with distributional regression (XGBoostLSS) extends the traditional approach by simultaneously predicting all parameters of a probability distribution rather than just the expected value \citep{marz2019xgboostlss}. For a gamma distribution, this means predicting both the concentration parameter ($\alpha$) and the rate parameter ($\beta$). This allows the model to capture heteroscedastic uncertainty, where prediction confidence varies based on atmospheric conditions.
+
+This project aims to develop a probabilistic 35-day precipitation forecasting system for Miami that combines the strengths of NWP ensemble forecasts with machine learning. The 35-day horizon corresponds to the maximum GEFS forecast lead time of 840 hours, available from the 00 UTC initialization cycle. By fitting the model outputs to a gamma distribution (which we have empirically determined provides a good fit for cumulative precipitation in Miami), we can generate calibrated probabilistic forecasts that account for the inherent uncertainty at extended time horizons. Additionally, we train models at multiple time horizons, allowing the forecast distribution to be recalibrated as we approach the target date.
+
+\section{Dataset}
+
+\subsection{Data Sources and Aggregation}
+
+Our dataset aggregates multiple data sources to create a comprehensive feature set for precipitation prediction. We use NOAA GHCND observations from Miami International Airport as our ground truth for precipitation, while expanding the feature space with data from nearby weather stations, numerical weather prediction (NWP) forecasts, and reanalysis products. The dataset contains no missing values for the time periods used in training.
+
+Our feature set includes both categorical and numerical variables. We begin with as many relevant features as we can obtain from sources in the Miami area, currently comprising approximately 20 observed features (recorded at the time of observation) and over 100 forecast features from NWP products. We will apply dimensionality reduction techniques (PCA or recursive feature elimination) to reduce the forecast features to approximately 10, while retaining observed features based on their predictive utility.
+
+\subsubsection{Ground Truth}
+\begin{itemize}
+    \item \textbf{NOAA GHCND:}\footnote{\url{https://www.ncei.noaa.gov/products/land-based-station/global-historical-climatology-network-daily}} Daily precipitation observations from Miami International Airport (station USW00012839) serve as our target variable. This station provides high-quality, continuously maintained records ideal for verification.
+\end{itemize}
+
+\subsubsection{Numerical Weather Prediction Forecasts}
+
+A key component of our approach is learning from the biases of existing NWP systems. We incorporate forecasts from the Global Ensemble Forecast System (GEFS):
+
+\begin{itemize}
+    \item \textbf{GEFS Reforecast (2000 to 2019):}\footnote{\url{https://registry.opendata.aws/noaa-gefs-reforecast/}} Retrospective ensemble forecasts run with consistent GEFSv12 model physics. Weekly runs (Wednesdays) provide 11 ensemble members with forecasts extending to 840 hours (35 days), yielding approximately 1,040 training samples over the 20-year period. Additionally, daily runs with 5 ensemble members extend to 384 hours (16 days), providing approximately 7,300 samples for shorter-horizon models.
+
+    \item \textbf{GEFS Operational (September 2020 to present):}\footnote{\url{https://registry.opendata.aws/noaa-gefs/}} Real-time ensemble forecasts with 31 members, initialized once daily at 00 UTC with forecasts extending to 35 days (840 hours). This provides approximately 1,970 additional training samples through early 2026.
+\end{itemize}
+
+While the reforecast and operational ensembles differ in configuration, there is substantial overlap in the underlying model physics. Training on data from both sources increases the total sample size and exposes the model to a wider range of ensemble configurations. We anticipate that this will produce a more generalizable and less brittle model. If we find that the model is learning strong biases in the forecasts, we may switch to just using the GEFS Operational data despite the loss in data points. 
+
+Key forecast variables include accumulated precipitation (APCP), convective available potential energy (CAPE), precipitable water (PWAT), temperature, relative humidity, cloud cover, and wind components at multiple levels.
+
+\subsubsection{Historical and Reanalysis Data}
+\begin{itemize}
+    \item \textbf{Open-Meteo / ERA5:}\footnote{\url{https://open-meteo.com/en/docs/historical-weather-api}} Hourly meteorological variables including temperature, humidity, wind, and precipitation derived from ERA5 reanalysis, providing consistent gridded data back to 1940.
+
+    \item \textbf{Nearby GHCND Stations:} Observations from surrounding South Florida stations (Fort Lauderdale, Homestead, Tamiami, coastal sites) enable spatial feature engineering to capture how precipitation patterns propagate across the region.
+\end{itemize}
+
+\subsection{Target Variable}
+
+Our target is 35-day accumulated precipitation at Miami International Airport. Exploratory analysis reveals that monthly precipitation in Miami follows a right-skewed distribution well-approximated by a gamma distribution, parameterized by shape ($\alpha$) and rate ($\beta$). This motivates our use of XGBoostLSS to predict the gamma distribution parameters directly.
+
+Figure~\ref{fig:monthly_precip_hist} shows the distribution of monthly precipitation totals from over 75 years of observations at Miami International Airport. The histogram exhibits the characteristic right-skewed shape typical of precipitation data: most months receive moderate rainfall, while occasional months experience substantially higher totals due to tropical storms and persistent wet patterns. The fitted gamma distribution ($\alpha = 1.21$, $\beta = 0.009$) captures this asymmetric structure well, providing theoretical justification for our distributional modeling approach.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{miami_monthly_rainfall_histogram.png}
+    \caption{Distribution of monthly precipitation at Miami International Airport (1948 to 2025). The histogram shows the observed frequency of monthly totals, with a fitted gamma distribution overlay demonstrating the suitability of the gamma family for modeling precipitation.}
+    \label{fig:monthly_precip_hist}
+\end{figure}
+
+\subsection{Modeling Approach}
+
+Our XGBoostLSS model directly predicts both parameters of a gamma distribution: the concentration parameter ($\alpha$, also called shape) and the rate parameter ($\beta$). Unlike standard XGBoost which predicts a single target, XGBoostLSS uses a multi-output architecture where each boosting iteration updates gradients for both $\alpha$ and $\beta$ simultaneously. 
+
+Given the same input features (including historical observations from the NOAA and Open-Meteo datasets, NWP forecast variables, and seasonal encodings), the model outputs both parameters that together define the full probabilistic forecast. We train separate XGBoostLSS models for multiple forecast horizons (such as 35, 28, 21, 14, and 7 days), enabling dynamic recalibration of the predicted distribution as we approach the target date. As newer forecast data becomes available, the model at the corresponding horizon provides an updated probabilistic estimate, allowing uncertainty to narrow over time.
+
+For any model that uses a time horizon greater than 16 days, we use the weekly GEFS reforecast data (2000 to 2019) combined with daily operational data (September 2020 to present), yielding approximately 3,000 training samples. For shorter-horizon models, we can additionally leverage the daily GEFS reforecast runs which extend to 16 days (384 hours), providing approximately 7,300 reforecast samples plus the operational data, totaling over 9,000 samples. This larger training set for shorter horizons enables the near-term models to achieve higher accuracy.
+
+Since XGBoost does not inherently model temporal dependencies, we will use manually engineered features including lag variables, rolling statistics, and cyclical calendar encodings. We will also implement a hybrid architecture using an LSTM layer to process sequential data before feeding learned embeddings into XGBoost, and compare the performance of both approaches.
+
+\section{Research Questions}
+
+This project addresses a regression problem with probabilistic outputs. Specifically, we aim to answer the following research questions:
+
+\begin{enumerate}
+    \item \textbf{Distributional Forecasting:} Can XGBoost with distributional regression (XGBoostLSS) effectively predict the parameters of a gamma distribution for 35-day precipitation totals in Miami?
+
+    \item \textbf{Feature Importance:} Which meteorological variables and NWP forecast products contribute most to skillful 35-day precipitation predictions? How do the relative contributions of historical observations versus NWP forecasts change at extended lead times?
+
+    \item \textbf{Uncertainty Quantification:} Do the predicted gamma distribution parameters (concentration $\alpha$ and rate $\beta$) accurately capture the true forecast uncertainty? Are the predicted probability distributions well-calibrated? How does forecast uncertainty narrow as we use models with nearer time horizons?
+
+    \item \textbf{Seasonal Skill:} How does forecast skill vary across seasons, particularly between Miami's distinct wet season (May to October) and dry season (November to April)?
+
+    \item \textbf{Comparison to Climatology:} Does the machine learning approach provide meaningful improvement over climatological baselines (historical average precipitation for each month)?
+\end{enumerate}
+
+\subsection{Evaluation Metrics}
+
+We will evaluate our probabilistic forecasts using:
+\begin{itemize}
+    \item \textbf{Continuous Ranked Probability Score (CRPS):} Measures the quality of probabilistic forecasts by comparing the predicted cumulative distribution function to the observed outcome.
+    \item \textbf{Log-likelihood:} Evaluates how well the predicted gamma distribution matches the observed precipitation.
+    \item \textbf{Calibration plots:} Visual assessment of whether the predicted quantiles match observed frequencies.
+    \item \textbf{Mean Absolute Error (MAE):} Point estimate accuracy using the predicted distribution mean.
+\end{itemize}
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{1}
+
+\bibitem[M{\"a}rz(2019)]{marz2019xgboostlss}
+Alexander M{\"a}rz.
+\newblock XGBoostLSS -- An extension of XGBoost to probabilistic forecasting.
+\newblock \emph{arXiv preprint arXiv:1907.03178}, 2019.
+
+\end{thebibliography}
+
+\end{document}
