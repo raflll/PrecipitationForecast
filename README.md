@@ -1,142 +1,143 @@
-# Setup Guide
+# Miami Probabilistic Precipitation Forecasting
 
-## Quick Start
+Probabilistic precipitation forecasting for Miami using XGBoostLSS and GEFS ensemble weather data. The model predicts full Gamma probability distributions for cumulative rainfall over 3 to 35-day horizons.
 
-### 1. Install Python Dependencies
+## Overview
 
-Using pip with virtual environment (recommended):
-```bash
-# Create virtual environment
-python3 -m venv venv
+This project builds a machine learning pipeline that combines NOAA station observations (1948-present) with GEFS ensemble forecast data (2000-present) to produce calibrated probabilistic precipitation forecasts for Miami International Airport. Instead of point predictions, the model outputs Gamma distribution parameters (concentration and rate), enabling prediction intervals and risk quantification.
 
-# Activate it
-source venv/bin/activate
+## Data Sources
 
-# Install dependencies
-pip install -r requirements.txt
-```
-
-Or using pip with `--user` flag:
-```bash
-pip3 install --user -r requirements.txt
-```
-
-Or using conda:
-```bash
-conda install pandas numpy requests jupyter matplotlib seaborn
-pip install meteostat
-```
-
-### 2. Verify NOAA Token
-
-Your NOAA token is stored in `.env` file. To verify it works:
-
-```bash
-python3 test_noaa_connection.py
-```
-
-This will test:
-- Token is loaded correctly
-- API connection works
-- Can retrieve station info for Miami
-- Can fetch sample data
-
-### 3. Start Collecting Data
-
-#### Option A: Use Jupyter Notebooks (Recommended)
-```bash
-jupyter notebook
-```
-
-Then open:
-- `spatial_features_collection.ipynb` - For multi-station spatial features
-- `scripts/data_collection.ipynb` - For basic data collection
-
-#### Option B: Use Python Scripts
-You can convert the notebooks to scripts and run them directly.
+| Source | Coverage | Auth | Description |
+|--------|----------|------|-------------|
+| [NOAA CDO](https://www.ncdc.noaa.gov/cdo-web/) | 1948-present | API token | Daily precipitation, temperature, weather types from station USW00012839 (Miami Intl Airport) |
+| [Open-Meteo](https://open-meteo.com/) | 1940-present | None | Daily temperature, wind, sunshine, precipitation hours |
+| [GEFS Reforecast](https://noaa-gefs-retrospective.s3.amazonaws.com/) | 2000-2019 | None | Wednesday-only 35-day ensemble forecasts (11 members) from AWS S3 |
+| [GEFS Operational](https://www.nco.ncep.noaa.gov/pmb/products/gens/) | Sept 2020-present | None | Daily 35-day ensemble forecasts (mean + spread) via Herbie |
 
 ## Project Structure
 
 ```
 GroupProject/
-├── .env                          # NOAA API token
-├── requirements.txt              # Python dependencies
-├── SETUP.md                      # This file
-├── test_noaa_connection.py       # Test NOAA API connection
-├── spatial_features_collection.ipynb  # Main notebook for spatial features
+├── src/
+│   └── train_xgboostlss.py              # Model training + evaluation + diagnostics
 ├── scripts/
-│   └── data_collection.ipynb     # Basic data collection
-├── data/
-│   ├── STATIONS.md               # Documentation of all weather stations
-│   ├── noaa/                     # NOAA CDO data
-│   ├── open-meteo/               # Open-Meteo data
-│   ├── meteostat/                # MeteoStat data
-│   └── kalshi/                   # Kalshi data (future)
-└── docs/
-    └── Project.md                # Project documentation
+│   ├── data_collection/
+│   │   └── data_collection.ipynb         # Pull raw NOAA + Open-Meteo data
+│   ├── data_processing/
+│   │   ├── rebuild_miami_clean.py        # Clean/merge observations → miami_clean.csv
+│   │   └── build_training_dataset.py     # Feature engineering → training_dataset.parquet
+│   ├── pull_gefs_reforecast.py           # Download GEFS reforecast data (2000-2019)
+│   ├── pull_gefs_operational.py          # Download GEFS operational data (2020+)
+│   └── visualizations/
+│       ├── miami_monthly_rainfall_histogram.py
+│       ├── monthly_precipitation_comparison.py
+│       └── gefs_bias_analysis.py
+├── data/                                 # All data (gitignored)
+│   ├── noaa/                             # Raw NOAA station data
+│   ├── open-meteo/                       # Raw Open-Meteo data
+│   ├── miami_clean.csv                   # Cleaned daily observations
+│   ├── GEFS_Reforecast/                  # Reforecast parquets by year
+│   ├── GEFS_Operational/                 # Operational parquets by year
+│   └── training/
+│       └── training_dataset.parquet      # Final ML-ready dataset
+├── models/                               # Trained models + metrics (gitignored)
+├── visualizations/                       # Generated plots (gitignored)
+├── docs/
+│   ├── MODEL_CARD.md                     # Feature documentation + model details
+│   └── DATA_SOURCES.md                   # Data source technical reference
+└── requirements.txt
 ```
 
-## Data Sources
+## Setup
 
-### 1. NOAA Climate Data Online (CDO)
-- **Requires**: API token (already in `.env`)
-- **Data**: Historical precipitation, temperature, wind
-- **Coverage**: 1948-present for Miami
-- **Rate Limits**: 5 req/sec, 10,000 req/day
-
-### 2. Open-Meteo (No token required)
-- **Data**: Historical weather back to 1940
-- **Coverage**: Hourly resolution, 9km spatial resolution
-- **Rate Limits**: None for reasonable usage
-
-### 3. MeteoStat (No token required)
-- **Data**: Historical weather from NOAA and other sources
-- **Coverage**: Varies by station
-- **Installation**: `pip install meteostat`
-
-## Troubleshooting
-
-### "Module not found" errors
-Install the missing package:
 ```bash
-pip3 install --user package_name
+# Create and activate virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-### NOAA API rate limit exceeded
-Wait a few seconds between requests. The notebooks include rate limiting.
+A NOAA CDO API token is required for raw data collection. Get one at https://www.ncdc.noaa.gov/cdo-web/token and save it in a `.env` file:
 
-### Token not working
-Check that `.env` file contains:
 ```
-NOAA_TOKEN=your_actual_token
+NOAA_TOKEN=your_token_here
 ```
 
-### Can't access .env in notebooks
-Add this cell at the top of your notebook:
-```python
-import os
-from pathlib import Path
+## Reproducing the Pipeline
 
-# Load .env
-env_file = Path('.env')
-if env_file.exists():
-    with open(env_file) as f:
-        for line in f:
-            if '=' in line and not line.startswith('#'):
-                key, value = line.strip().split('=', 1)
-                os.environ[key] = value
+### Step 1: Collect raw observations
+
+Open `scripts/data_collection/data_collection.ipynb` in Jupyter and run all cells. This pulls daily weather data from NOAA CDO and Open-Meteo into `data/noaa/` and `data/open-meteo/`.
+
+```bash
+jupyter notebook scripts/data_collection/data_collection.ipynb
 ```
 
-## Next Steps
+### Step 2: Clean and merge observations
 
-1. Run `test_noaa_connection.py` to verify setup
-2. Open `spatial_features_collection.ipynb` in Jupyter
-3. Run the notebook cells to collect data
-4. Data will be saved to `data/` folder
-5. Build features for precipitation prediction model
+```bash
+python scripts/data_processing/rebuild_miami_clean.py
+```
 
-## Getting Help
+Merges NOAA and Open-Meteo data, adds weather type flags, and outputs `data/miami_clean.csv`.
 
-- NOAA CDO API Docs: https://www.ncdc.noaa.gov/cdo-web/webservices/v2
-- Open-Meteo Docs: https://open-meteo.com/en/docs
-- MeteoStat Docs: https://dev.meteostat.net/python/
+### Step 3: Download GEFS forecast data
+
+```bash
+# Reforecast data (2000-2019, Wednesday-only, downloads from S3)
+python scripts/pull_gefs_reforecast.py --start-year 2000 --end-year 2019
+
+# Operational data (one year at a time, downloads via Herbie)
+python scripts/pull_gefs_operational.py 2024
+```
+
+Both scripts support resuming from where they left off if interrupted.
+
+### Step 4: Build training dataset
+
+```bash
+python scripts/data_processing/build_training_dataset.py
+```
+
+Engineers 125+ features from observations and GEFS data across 6 forecast horizons (3, 7, 14, 21, 28, 35 days). Outputs `data/training/training_dataset.parquet`. See [docs/MODEL_CARD.md](docs/MODEL_CARD.md) for the full feature list.
+
+### Step 5: Train models
+
+```bash
+# Train a single horizon
+python src/train_xgboostlss.py --horizon 14
+
+# Train all horizons (3, 7, 14, 21, 28, 35 days)
+python src/train_xgboostlss.py
+
+# Quick test run (fewer Optuna trials)
+python src/train_xgboostlss.py --horizon 14 --quick
+```
+
+Outputs trained models to `models/`, evaluation metrics to `models/all_metrics.csv`, and diagnostic visualizations to `visualizations/`.
+
+## Model
+
+XGBoostLSS with a Gamma distribution, tuned via Optuna (30 trials, 3-fold CV). Predicts concentration and rate parameters, giving full probability distributions rather than point forecasts.
+
+- **Horizons**: 3, 7, 14, 21, 28, 35 days
+- **Train**: 2000-2023 | **Validation**: 2024 | **Test**: 2025
+- **Features**: 125+ engineered features across forecast, climatology, recent conditions, calendar, bias correction, and cross-feature categories
+
+See [docs/MODEL_CARD.md](docs/MODEL_CARD.md) for complete feature documentation and model details.
+
+### 14-Day Horizon Results
+
+| Metric | Validation | Test |
+|--------|-----------|------|
+| CRPS | 26.5 | 21.1 |
+| MAE (mm) | 38.4 | 30.6 |
+| Bias (mm) | +8.9 | +8.2 |
+| 90% Coverage | 67.2% | 72.6% |
+| 50% Coverage | 31.1% | 32.9% |
+| Mean Observed (mm) | 67.5 | 56.7 |
+| Mean Predicted (mm) | 76.4 | 64.9 |
