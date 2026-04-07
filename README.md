@@ -1,10 +1,91 @@
 # Miami Probabilistic Precipitation Forecasting
 
-Probabilistic precipitation forecasting for Miami using XGBoostLSS and GEFS ensemble weather data. The model predicts full Gamma probability distributions for cumulative rainfall over 3 to 35-day horizons.
+Probabilistic precipitation forecasting for Miami using XGBoostLSS, GAMLSS, and XGBoost Gamma models with GEFS ensemble weather data. Each model predicts full Gamma probability distributions for cumulative rainfall over 3 to 35-day horizons.
+
+## Quick Start: Training Models
+
+### Prerequisites
+
+```bash
+# Python dependencies
+pip install -r requirements.txt
+
+# R dependencies (install from R console)
+install.packages(c("arrow", "xgboost", "data.table", "ggplot2",
+                    "shapviz", "patchwork", "scoringRules", "scales", "jsonlite"))
+```
+
+The training dataset must exist at `data/training/training_dataset.parquet`. If it doesn't, follow the [full pipeline steps](#reproducing-the-pipeline) below.
+
+### Train XGBoostLSS (Python)
+
+```bash
+# Train all horizons (3, 7, 14, 21, 28, 35 days)
+python src/train_xgboostlss.py
+
+# Single horizon
+python src/train_xgboostlss.py --horizon 14
+
+# Quick test run (fewer Optuna trials, faster)
+python src/train_xgboostlss.py --horizon 14 --quick
+```
+
+Outputs: `models/xgboostlss_*d.json`, `models/all_metrics.csv`, `visualizations/xgboostlss_*d_*.png`
+
+### Train GAMLSS (R)
+
+```bash
+# Train all horizons
+Rscript src/train_gamlss.R
+
+# Single horizon
+Rscript src/train_gamlss.R --horizon 14
+
+# Quick test run
+Rscript src/train_gamlss.R --horizon 14 --quick
+```
+
+Outputs: `models/gamlss_*d.rds`, `models/gamlss_all_metrics.csv`, `visualizations/gamlss_*d_*.png`
+
+### Train XGBoost Gamma (R)
+
+```bash
+Rscript src/train_xgboost_gamma.R
+Rscript src/train_xgboost_gamma.R --horizon 14
+Rscript src/train_xgboost_gamma.R --quick
+```
+
+Outputs: `models/xgboost_gamma_*d.rds`, `visualizations/xgboost_gamma_*d_*.png`
+
+### Compare Models
+
+After training multiple models, generate comparison charts:
+
+```bash
+python scripts/visualizations/model_comparison.py
+python scripts/visualizations/coverage_by_horizon.py
+```
+
+### What Each Model Produces
+
+All models generate the same set of diagnostic plots per horizon:
+
+| Plot | Description |
+|------|-------------|
+| `*_pred_vs_obs.png` | Predicted vs observed scatter with LOESS fit |
+| `*_intervals.png` | Full-year prediction intervals (90% and 50% PI) |
+| `*_pit.png` | PIT histogram (calibration diagnostic) |
+| `*_reliability.png` | Reliability diagram with tolerance band |
+| `*_importance.png` | Top 25 features by XGBoost gain |
+| `*_shap_beeswarm.png` | SHAP beeswarm plot |
+| `*_residuals.png` | Residual distribution |
+| `*_monthly.png` | Monthly observed vs predicted bars |
+
+---
 
 ## Overview
 
-This project builds a machine learning pipeline that combines NOAA station observations (1948-present) with GEFS ensemble forecast data (2000-present) to produce calibrated probabilistic precipitation forecasts for Miami International Airport. Instead of point predictions, the model outputs Gamma distribution parameters (concentration and rate), enabling prediction intervals and risk quantification.
+This project builds a machine learning pipeline that combines NOAA station observations (1948-present) with GEFS ensemble forecast data (2000-present) to produce calibrated probabilistic precipitation forecasts for Miami International Airport. Instead of point predictions, each model outputs Gamma distribution parameters, enabling prediction intervals and risk quantification.
 
 ## Data Sources
 
@@ -20,7 +101,12 @@ This project builds a machine learning pipeline that combines NOAA station obser
 ```
 GroupProject/
 ├── src/
-│   └── train_xgboostlss.py              # Model training + evaluation + diagnostics
+│   ├── train_xgboostlss.py              # XGBoostLSS training (Python)
+│   ├── train_gamlss.R                    # GAMLSS 2-stage training (R)
+│   ├── train_xgboost_gamma.R             # XGBoost Gamma regression (R)
+│   ├── evaluation.py                     # Shared metrics + plotting
+│   ├── calibration.py                    # Post-hoc calibration utilities
+│   └── viz_theme.py                      # Unified visualization theme
 ├── scripts/
 │   ├── data_collection/
 │   │   └── data_collection.ipynb         # Pull raw NOAA + Open-Meteo data
@@ -32,7 +118,8 @@ GroupProject/
 │   └── visualizations/
 │       ├── miami_monthly_rainfall_histogram.py
 │       ├── monthly_precipitation_comparison.py
-│       └── gefs_bias_analysis.py
+│       ├── model_comparison.py           # Cross-model metric comparison
+│       └── coverage_by_horizon.py        # Coverage summary across horizons
 ├── data/                                 # All data (gitignored)
 │   ├── noaa/                             # Raw NOAA station data
 │   ├── open-meteo/                       # Raw Open-Meteo data
@@ -107,37 +194,22 @@ Engineers 125+ features from observations and GEFS data across 6 forecast horizo
 
 ### Step 5: Train models
 
-```bash
-# Train a single horizon
-python src/train_xgboostlss.py --horizon 14
+See [Quick Start](#quick-start-training-models) above for all training commands. All three models support `--horizon N` and `--quick` flags.
 
-# Train all horizons (3, 7, 14, 21, 28, 35 days)
-python src/train_xgboostlss.py
+## Models
 
-# Quick test run (fewer Optuna trials)
-python src/train_xgboostlss.py --horizon 14 --quick
-```
+Three distributional regression models, all outputting Gamma distribution parameters for uncertainty quantification:
 
-Outputs trained models to `models/`, evaluation metrics to `models/all_metrics.csv`, and diagnostic visualizations to `visualizations/`.
+| Model | Language | Approach | Tuning |
+|-------|----------|----------|--------|
+| **XGBoostLSS** | Python | Direct Gamma NLL via XGBoostLSS library | Optuna (30 trials, 3-fold CV) |
+| **GAMLSS** | R | 2-stage: XGBoost mean on log1p(precip) + XGBoost variance on CV residuals | Random search (40 + 20 trials) |
+| **XGBoost Gamma** | R | Native `reg:gamma` objective + MLE shape from residuals | Bayesian optimization (30 trials) |
 
-## Model
-
-XGBoostLSS with a Gamma distribution, tuned via Optuna (30 trials, 3-fold CV). Predicts concentration and rate parameters, giving full probability distributions rather than point forecasts.
+All models include post-hoc variance scaling calibration on the validation set to improve prediction interval coverage.
 
 - **Horizons**: 3, 7, 14, 21, 28, 35 days
-- **Train**: 2000-2023 | **Validation**: 2024 | **Test**: 2025
-- **Features**: 125+ engineered features across forecast, climatology, recent conditions, calendar, bias correction, and cross-feature categories
+- **Train**: 2019, 2022 | **Validation**: held-out from train | **Test**: 2025
+- **Features**: 132 engineered features across forecast, climatology, recent conditions, calendar, bias correction, and cross-feature categories
 
 See [docs/MODEL_CARD.md](docs/MODEL_CARD.md) for complete feature documentation and model details.
-
-### 14-Day Horizon Results
-
-| Metric | Validation | Test |
-|--------|-----------|------|
-| CRPS | 26.5 | 21.1 |
-| MAE (mm) | 38.4 | 30.6 |
-| Bias (mm) | +8.9 | +8.2 |
-| 90% Coverage | 67.2% | 72.6% |
-| 50% Coverage | 31.1% | 32.9% |
-| Mean Observed (mm) | 67.5 | 56.7 |
-| Mean Predicted (mm) | 76.4 | 64.9 |

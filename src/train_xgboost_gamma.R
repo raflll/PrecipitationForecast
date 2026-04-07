@@ -65,6 +65,44 @@ NON_FEATURE_COLS <- c("init_date", "horizon_days", "ground_truth_precip", "sourc
 
 
 # ==============================================================================
+# Custom Theme (matching GAMLSS pipeline)
+# ==============================================================================
+
+theme_precip <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) %+replace%
+    theme(
+      plot.title       = element_text(face = "bold", size = base_size + 2,
+                                       hjust = 0, margin = margin(b = 8)),
+      plot.subtitle    = element_text(color = "grey40", size = base_size,
+                                       hjust = 0, margin = margin(b = 12)),
+      axis.title       = element_text(size = base_size),
+      axis.text        = element_text(size = base_size - 1, color = "grey30"),
+      legend.position  = "bottom",
+      legend.title     = element_text(face = "bold", size = base_size - 1),
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "grey92", linewidth = 0.4),
+      plot.background  = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      strip.text       = element_text(face = "bold", size = base_size)
+    )
+}
+
+COLORS <- list(
+  primary    = "#1B6CA8",
+  secondary  = "#E8751A",
+  accent     = "#2CA02C",
+  light_blue = "#A8D4F0",
+  red        = "#D62728",
+  purple     = "#9467BD",
+  forecast   = "#2196F3",
+  climate    = "#FF9800",
+  recent     = "#4CAF50",
+  calendar   = "#9C27B0",
+  bias       = "#FF5722"
+)
+
+
+# ==============================================================================
 # Data Loading
 # ==============================================================================
 
@@ -389,8 +427,8 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
       title = sprintf("XGBoost Gamma %dd: Predicted vs Observed", horizon)
     ) +
     coord_fixed(xlim = c(0, max_val), ylim = c(0, max_val)) +
-    theme_minimal()
-  ggsave(paste0(prefix, "_pred_vs_obs.png"), p1, width = 8, height = 6, dpi = 150)
+    theme_precip()
+  ggsave(paste0(prefix, "_pred_vs_obs.png"), p1, width = 8, height = 6, dpi = 200)
 
 
   # --- 2. Prediction Intervals (first 100 test points) ---
@@ -414,8 +452,8 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
       y     = "Precipitation (mm)",
       title = sprintf("XGBoost Gamma %dd: Prediction Intervals (2025 test)", horizon)
     ) +
-    theme_minimal()
-  ggsave(paste0(prefix, "_intervals.png"), p2, width = 14, height = 5, dpi = 150)
+    theme_precip()
+  ggsave(paste0(prefix, "_intervals.png"), p2, width = 14, height = 5, dpi = 200)
 
 
   # --- 3. Feature Importance (gain-based, top 25) ---
@@ -432,9 +470,9 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
         x     = "Gain",
         title = sprintf("XGBoost Gamma %dd: Top 25 Features by Gain", horizon)
       ) +
-      theme_minimal() +
+      theme_precip() +
       theme(legend.position = "bottom")
-    ggsave(paste0(prefix, "_importance.png"), p3, width = 10, height = 8, dpi = 150)
+    ggsave(paste0(prefix, "_importance.png"), p3, width = 10, height = 8, dpi = 200)
   }, error = function(e) {
     cat(sprintf("  Warning: Could not plot feature importance: %s\n", e$message))
   })
@@ -455,7 +493,7 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
     p4a <- shap.plot.summary(shap_long, dilute = FALSE) +
       ggtitle(sprintf("XGBoost Gamma %dd: SHAP Beeswarm", horizon))
     ggsave(paste0(prefix, "_shap_beeswarm.png"), p4a,
-           width = 12, height = 10, dpi = 150)
+           width = 12, height = 10, dpi = 200)
 
     # Bar plot (mean |SHAP|)
     mean_shap <- sort(shap_result$mean_shap_score, decreasing = TRUE)
@@ -471,9 +509,9 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
         y     = NULL,
         title = sprintf("XGBoost Gamma %dd: Mean |SHAP|", horizon)
       ) +
-      theme_minimal()
+      theme_precip()
     ggsave(paste0(prefix, "_shap_bar.png"), p4b,
-           width = 12, height = 8, dpi = 150)
+           width = 12, height = 8, dpi = 200)
 
     # Dependence plots for top 4 features
     top4 <- names(mean_shap)[1:min(4, length(mean_shap))]
@@ -483,7 +521,7 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
         x             = feat,
         color_feature = "auto",
         smooth        = FALSE
-      ) + ggtitle(feat) + theme_minimal()
+      ) + ggtitle(feat) + theme_precip()
     })
 
     if (has_patchwork && length(dep_plots) == 4) {
@@ -496,13 +534,13 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
       # Fallback: save individual plots
       for (j in seq_along(dep_plots)) {
         ggsave(sprintf("%s_shap_dep_%s.png", prefix, top4[j]),
-               dep_plots[[j]], width = 7, height = 5, dpi = 150)
+               dep_plots[[j]], width = 7, height = 5, dpi = 200)
       }
       p4c <- NULL
     }
     if (!is.null(p4c)) {
       ggsave(paste0(prefix, "_shap_dependence.png"), p4c,
-             width = 14, height = 10, dpi = 150)
+             width = 14, height = 10, dpi = 200)
     }
 
     cat("    SHAP plots saved.\n")
@@ -523,8 +561,8 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
       y     = "Density",
       title = sprintf("XGBoost Gamma %dd: PIT Histogram (Calibration)", horizon)
     ) +
-    theme_minimal()
-  ggsave(paste0(prefix, "_pit.png"), p5, width = 6, height = 4, dpi = 150)
+    theme_precip()
+  ggsave(paste0(prefix, "_pit.png"), p5, width = 6, height = 4, dpi = 200)
 
 
   # --- 6. Reliability Diagram ---
@@ -548,8 +586,8 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
       title = sprintf("XGBoost Gamma %dd: Reliability Diagram", horizon)
     ) +
     coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
-    theme_minimal()
-  ggsave(paste0(prefix, "_reliability.png"), p6, width = 6, height = 6, dpi = 150)
+    theme_precip()
+  ggsave(paste0(prefix, "_reliability.png"), p6, width = 6, height = 6, dpi = 200)
 }
 
 

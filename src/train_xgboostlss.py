@@ -35,9 +35,14 @@ import numpy as np
 import pandas as pd
 import shap
 import xgboost as xgb
-from scipy.stats import gamma as sp_gamma
 from xgboostlss.distributions.Gamma import Gamma
 from xgboostlss.model import XGBoostLSS
+
+# Add src/ to path for local imports
+sys.path.insert(0, str(Path(__file__).parent))
+from evaluation import compute_metrics, plot_all_diagnostics, plot_calibration_comparison
+from calibration import find_optimal_scale_factor
+from viz_theme import DPI
 
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -159,236 +164,35 @@ def train_model(
     return xgblss, opt_params
 
 
-def _crps_gamma_analytical(y: float, concentration: float, scale: float) -> float:
-    """Analytical CRPS for a single Gamma(concentration, scale) observation.
-
-    Uses the closed-form: CRPS = y*(2F(y) - 1) - a*s*(2*F_a1(y) - 1) - a*s/B(0.5, a)
-    where F is Gamma CDF, F_a1 is Gamma(a+1, s) CDF, B is Beta function.
-    """
-    from scipy.special import beta as beta_fn
-    a, s = concentration, scale
-    F_y = sp_gamma.cdf(y, a=a, scale=s)
-    F_y_a1 = sp_gamma.cdf(y, a=a + 1, scale=s)
-    return y * (2 * F_y - 1) - a * s * (2 * F_y_a1 - 1 + 1.0 / (a * beta_fn(0.5, a)))
-
-
-def evaluate_model(
-    xgblss: XGBoostLSS,
-    df: pd.DataFrame,
-    feature_cols: list[str],
-    split_name: str,
-) -> dict:
-    """Evaluate model on a dataset, return metrics dict."""
+def predict_params(xgblss: XGBoostLSS, df: pd.DataFrame, feature_cols: list[str]):
+    """Get Gamma distribution parameters from model predictions."""
     dmat = prepare_dmatrix(df, feature_cols)
-    y = df["ground_truth_precip"].values
-
-    # Predict distribution parameters
     pred_params = xgblss.predict(dmat, pred_type="parameters")
-    concentration = pred_params["concentration"].values
-    rate = pred_params["rate"].values
-    scale = 1.0 / rate
-
-    # Predicted mean and variance
-    pred_mean = concentration / rate
-    pred_var = concentration / rate**2
-
-    # Compute quantiles analytically from gamma params (no sampling needed)
-    quantile_levels = [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-    pred_q = pd.DataFrame({
-        f"quant_{q}": sp_gamma.ppf(q, a=concentration, scale=scale)
-        for q in quantile_levels
-    })
-
-    # CRPS via analytical formula for gamma distribution
-    # CRPS(Gamma(a, scale), y) computed using scipy
-    crps_scores = np.array([
-        _crps_gamma_analytical(y[i], concentration[i], scale[i])
-        for i in range(len(y))
-    ])
-    mean_crps = float(np.mean(crps_scores))
-
-    # Negative log-likelihood
-    nll = -sp_gamma.logpdf(y, a=concentration, scale=scale)
-    # Clip extreme NLL values to avoid inf issues
-    nll = np.clip(nll, -100, 100)
-    mean_nll = float(np.mean(nll))
-
-    # Mean absolute error of predicted mean
-    mae = float(np.mean(np.abs(pred_mean - y)))
-
-    # Bias
-    bias = float(np.mean(pred_mean - y))
-
-    # Coverage
-    coverage_90 = float(np.mean((y >= pred_q["quant_0.05"].values) & (y <= pred_q["quant_0.95"].values)))
-    coverage_50 = float(np.mean((y >= pred_q["quant_0.25"].values) & (y <= pred_q["quant_0.75"].values)))
-
-    # Median absolute deviation
-    median_ae = float(np.median(np.abs(pred_q["quant_0.5"].values - y)))
-
-    # Reliability: check coverage at multiple levels
-    reliability = {}
-    for level in [0.5, 0.6, 0.7, 0.8, 0.9, 0.95]:
-        lo_q = (1 - level) / 2
-        hi_q = 1 - lo_q
-        lo = sp_gamma.ppf(lo_q, a=concentration, scale=scale)
-        hi = sp_gamma.ppf(hi_q, a=concentration, scale=scale)
-        actual_cov = float(np.mean((y >= lo) & (y <= hi)))
-        reliability[f"cov_{int(level*100)}"] = actual_cov
-
-    metrics = {
-        "split": split_name,
-        "n_samples": len(y),
-        "mean_crps": mean_crps,
-        "mean_nll": mean_nll,
-        "mae": mae,
-        "bias": bias,
-        "coverage_90": coverage_90,
-        "coverage_50": coverage_50,
-        "median_ae": median_ae,
-        "mean_observed": float(np.mean(y)),
-        "mean_predicted": float(np.mean(pred_mean)),
-        **reliability,
-    }
-
-    return metrics, pred_params, pred_q
+    return pred_params["concentration"].values, pred_params["rate"].values, dmat
 
 
-def plot_diagnostics(
+def plot_shap(
     xgblss: XGBoostLSS,
+    dtest: xgb.DMatrix,
     test_df: pd.DataFrame,
-    pred_params: pd.DataFrame,
-    pred_q: pd.DataFrame,
     feature_cols: list[str],
     horizon: int,
 ):
-    """Generate diagnostic plots for a trained model."""
-    y = test_df["ground_truth_precip"].values
-    concentration = pred_params["concentration"].values
-    rate = pred_params["rate"].values
-    pred_mean = concentration / rate
-
-    # --- 1. Predicted vs Actual scatter ---
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.scatter(y, pred_mean, alpha=0.4, s=15)
-    max_val = max(y.max(), pred_mean.max()) * 1.1
-    ax.plot([0, max_val], [0, max_val], "r--", linewidth=1, label="Perfect")
-    ax.set_xlabel("Observed Precipitation (mm)")
-    ax.set_ylabel("Predicted Mean (mm)")
-    ax.set_title(f"XGBoostLSS {horizon}d: Predicted vs Observed")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(VIS_DIR / f"xgboostlss_{horizon}d_pred_vs_obs.png", dpi=150)
-    plt.close(fig)
-
-    # --- 2. Prediction intervals time series (first 100 test points) ---
-    n_plot = min(100, len(y))
-    idx = np.arange(n_plot)
-    fig, ax = plt.subplots(figsize=(14, 5))
-    ax.fill_between(
-        idx,
-        pred_q["quant_0.05"].values[:n_plot],
-        pred_q["quant_0.95"].values[:n_plot],
-        alpha=0.2,
-        color="blue",
-        label="90% PI",
-    )
-    ax.fill_between(
-        idx,
-        pred_q["quant_0.25"].values[:n_plot],
-        pred_q["quant_0.75"].values[:n_plot],
-        alpha=0.3,
-        color="blue",
-        label="50% PI",
-    )
-    ax.plot(idx, pred_q["quant_0.5"].values[:n_plot], "b-", linewidth=1, label="Median")
-    ax.plot(idx, y[:n_plot], "ko", markersize=3, label="Observed")
-    ax.set_xlabel("Test Sample Index")
-    ax.set_ylabel("Precipitation (mm)")
-    ax.set_title(f"XGBoostLSS {horizon}d: Prediction Intervals (2025 test)")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(VIS_DIR / f"xgboostlss_{horizon}d_intervals.png", dpi=150)
-    plt.close(fig)
-
-    # --- 3. Feature importance (gain-based, top 25) ---
-    dtest = prepare_dmatrix(test_df, feature_cols)
+    """Generate SHAP analysis plots (XGBoost-specific)."""
     try:
         booster = xgblss.booster
-        importance = booster.get_score(importance_type="gain")
-        if importance:
-            # Handle both fN format and actual feature name formats
-            sample_key = next(iter(importance))
-            if sample_key.startswith("f") and sample_key[1:].isdigit():
-                imp_df = pd.DataFrame([
-                    {"feature": feature_cols[int(k[1:])], "gain": v}
-                    for k, v in importance.items()
-                    if k.startswith("f") and k[1:].isdigit() and int(k[1:]) < len(feature_cols)
-                ])
-            else:
-                imp_df = pd.DataFrame([
-                    {"feature": k, "gain": v}
-                    for k, v in importance.items()
-                ])
-            imp_df = imp_df.sort_values("gain", ascending=True).tail(25)
-
-            fig, ax = plt.subplots(figsize=(10, 8))
-            colors = []
-            for feat in imp_df["feature"]:
-                if (feat.startswith("cum_") or feat.startswith("mean_6h") or
-                        feat.startswith("max_6h") or "forecast" in feat or
-                        "spread" in feat or (feat.startswith("q") and "_apcp" in feat) or
-                        "6h" in feat or "top10" in feat or feat.startswith("gefs_") or
-                        feat.startswith("persistence")):
-                    colors.append("#2196F3")  # blue = forecast
-                elif feat.startswith("clim_"):
-                    colors.append("#FF9800")  # orange = climatology
-                elif (feat.startswith("precip_") or feat.startswith("rainy_") or
-                      feat.startswith("max_precip") or feat.startswith("days_since") or
-                      feat.startswith("thunder") or feat.startswith("fog") or
-                      feat.startswith("mean_temp") or feat.startswith("temp_") or
-                      feat.startswith("mean_wind") or feat.startswith("mean_gust") or
-                      feat.startswith("mean_sun") or feat.startswith("sunshine") or
-                      feat.startswith("mean_precip_h") or feat.startswith("rain_flag") or
-                      feat.startswith("haze") or feat.startswith("mean_dtr")):
-                    colors.append("#4CAF50")  # green = recent conditions
-                else:
-                    colors.append("#9C27B0")  # purple = calendar/other
-            ax.barh(imp_df["feature"], imp_df["gain"], color=colors)
-            ax.set_xlabel("Gain")
-            ax.set_title(f"XGBoostLSS {horizon}d: Top 25 Features by Gain")
-            from matplotlib.patches import Patch
-            legend_elements = [
-                Patch(facecolor="#2196F3", label="Forecast"),
-                Patch(facecolor="#FF9800", label="Climatology"),
-                Patch(facecolor="#4CAF50", label="Recent Conditions"),
-                Patch(facecolor="#9C27B0", label="Calendar/Cross"),
-            ]
-            ax.legend(handles=legend_elements, loc="lower right")
-            fig.tight_layout()
-            fig.savefig(VIS_DIR / f"xgboostlss_{horizon}d_importance.png", dpi=150)
-            plt.close(fig)
-    except Exception as e:
-        print(f"  Warning: Could not plot feature importance: {e}")
-
-    # --- 3b. SHAP analysis (using XGBoost native pred_contribs) ---
-    try:
         print("    Computing SHAP values...")
         X_test = test_df[feature_cols].values.astype(np.float32)
         n_features = len(feature_cols)
 
-        # Use XGBoost's native SHAP via pred_contribs for multi-output compatibility
         contribs = booster.predict(dtest, pred_contribs=True)
         print(f"    pred_contribs shape: {contribs.shape}")
 
         if contribs.ndim == 3:
-            # Multi-output: determine axis layout using known n_features
             if contribs.shape[1] == n_features + 1:
-                # (n_samples, n_features+1, n_outputs)
                 shap_conc = contribs[:, :n_features, 0]
                 shap_rate = contribs[:, :n_features, 1] if contribs.shape[2] > 1 else None
             elif contribs.shape[2] == n_features + 1:
-                # (n_samples, n_outputs, n_features+1)
                 shap_conc = contribs[:, 0, :n_features]
                 shap_rate = contribs[:, 1, :n_features] if contribs.shape[1] > 1 else None
             else:
@@ -403,53 +207,44 @@ def plot_diagnostics(
 
         print(f"    Concentration SHAP shape: {shap_conc.shape}")
 
-        # Create SHAP Explanation object for proper plotting
         explanation_conc = shap.Explanation(
-            values=shap_conc,
-            data=X_test,
-            feature_names=feature_cols,
+            values=shap_conc, data=X_test, feature_names=feature_cols,
         )
 
-        # Beeswarm plot (concentration/shape parameter)
         fig = plt.figure(figsize=(12, 10))
         shap.plots.beeswarm(explanation_conc, max_display=25, show=False)
-        plt.title(f"XGBoostLSS {horizon}d: SHAP Beeswarm (concentration)")
+        plt.title(f"{horizon}-Day Forecast: SHAP Beeswarm (concentration)")
         plt.tight_layout()
-        plt.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_beeswarm.png", dpi=150, bbox_inches="tight")
+        plt.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_beeswarm.png", dpi=DPI, bbox_inches="tight")
         plt.close("all")
 
-        # Bar plot (mean |SHAP|)
         fig = plt.figure(figsize=(12, 8))
         shap.plots.bar(explanation_conc, max_display=25, show=False)
-        plt.title(f"XGBoostLSS {horizon}d: Mean |SHAP| (concentration)")
+        plt.title(f"{horizon}-Day Forecast: Mean |SHAP| (concentration)")
         plt.tight_layout()
-        plt.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_bar.png", dpi=150, bbox_inches="tight")
+        plt.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_bar.png", dpi=DPI, bbox_inches="tight")
         plt.close("all")
 
-        # Dependence plots for top 4 features
         mean_abs_shap = np.mean(np.abs(shap_conc), axis=0)
         top_indices = np.argsort(mean_abs_shap)[::-1][:4]
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         for idx, ax in zip(top_indices, axes.flat):
             shap.plots.scatter(explanation_conc[:, idx], ax=ax, show=False)
             ax.set_title(feature_cols[idx])
-        fig.suptitle(f"XGBoostLSS {horizon}d: SHAP Dependence (Top 4)", fontsize=14)
+        fig.suptitle(f"{horizon}-Day Forecast: SHAP Dependence (Top 4)", fontsize=14)
         fig.tight_layout()
-        fig.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_dependence.png", dpi=150)
+        fig.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_dependence.png", dpi=DPI)
         plt.close("all")
 
-        # Rate parameter SHAP (if multi-output)
         if shap_rate is not None:
             explanation_rate = shap.Explanation(
-                values=shap_rate,
-                data=X_test,
-                feature_names=feature_cols,
+                values=shap_rate, data=X_test, feature_names=feature_cols,
             )
             fig = plt.figure(figsize=(12, 10))
             shap.plots.beeswarm(explanation_rate, max_display=25, show=False)
-            plt.title(f"XGBoostLSS {horizon}d: SHAP Beeswarm (rate)")
+            plt.title(f"{horizon}-Day Forecast: SHAP Beeswarm (rate)")
             plt.tight_layout()
-            plt.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_rate.png", dpi=150, bbox_inches="tight")
+            plt.savefig(VIS_DIR / f"xgboostlss_{horizon}d_shap_rate.png", dpi=DPI, bbox_inches="tight")
             plt.close("all")
 
         print("    SHAP plots saved.")
@@ -457,44 +252,6 @@ def plot_diagnostics(
         print(f"  Warning: Could not compute SHAP values: {e}")
         import traceback
         traceback.print_exc()
-
-    # --- 4. Calibration: PIT histogram ---
-    scale = 1.0 / rate
-    pit = sp_gamma.cdf(y, a=concentration, scale=scale)
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.hist(pit, bins=20, density=True, alpha=0.7, edgecolor="black")
-    ax.axhline(1.0, color="red", linestyle="--", label="Ideal (uniform)")
-    ax.set_xlabel("PIT Value")
-    ax.set_ylabel("Density")
-    ax.set_title(f"XGBoostLSS {horizon}d: PIT Histogram (Calibration)")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(VIS_DIR / f"xgboostlss_{horizon}d_pit.png", dpi=150)
-    plt.close(fig)
-
-    # --- 5. Reliability diagram ---
-    nominal_levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
-    actual_covs = []
-    for level in nominal_levels:
-        lo_q = (1 - level) / 2
-        hi_q = 1 - lo_q
-        lo = sp_gamma.ppf(lo_q, a=concentration, scale=scale)
-        hi = sp_gamma.ppf(hi_q, a=concentration, scale=scale)
-        actual_covs.append(float(np.mean((y >= lo) & (y <= hi))))
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.plot([0, 1], [0, 1], "r--", linewidth=1, label="Perfect")
-    ax.plot(nominal_levels, actual_covs, "bo-", markersize=5, label="Model")
-    ax.set_xlabel("Nominal Coverage")
-    ax.set_ylabel("Actual Coverage")
-    ax.set_title(f"XGBoostLSS {horizon}d: Reliability Diagram")
-    ax.legend()
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.set_aspect("equal")
-    fig.tight_layout()
-    fig.savefig(VIS_DIR / f"xgboostlss_{horizon}d_reliability.png", dpi=150)
-    plt.close(fig)
 
 
 def main():
@@ -525,14 +282,12 @@ def main():
 
         # Get feature columns (drop columns that are all NaN for this horizon)
         feature_cols = get_feature_cols(train_df)
-        # Drop columns that have too many NaNs (sub-window features for smaller horizons)
         nan_pcts = train_df[feature_cols].isnull().mean()
         drop_cols = nan_pcts[nan_pcts > 0.5].index.tolist()
         if drop_cols:
             print(f"  Dropping {len(drop_cols)} high-NaN columns: {drop_cols}")
             feature_cols = [c for c in feature_cols if c not in drop_cols]
 
-        # Fill remaining NaNs with 0 (sub-window features that are partially available)
         for df in [train_df, val_df, test_df]:
             df[feature_cols] = df[feature_cols].fillna(0)
 
@@ -542,16 +297,30 @@ def main():
         print("\nTraining...")
         xgblss, opt_params = train_model(train_df, val_df, feature_cols, horizon, args.quick)
 
-        # Evaluate on val and test (skip train — slow and less useful)
+        # Predict on val and test
         print("\nEvaluating...")
-        for split_name, split_df in [("val", val_df), ("test", test_df)]:
-            metrics, pred_params, pred_q = evaluate_model(
-                xgblss, split_df, feature_cols, split_name
-            )
+        val_conc, val_rate, _ = predict_params(xgblss, val_df, feature_cols)
+        test_conc, test_rate, dtest = predict_params(xgblss, test_df, feature_cols)
+
+        # Calibrate: find optimal scale factor on validation set
+        y_val = val_df["ground_truth_precip"].values
+        y_test = test_df["ground_truth_precip"].values
+
+        print("\n  Calibrating (variance scaling on validation set)...")
+        scale_factor = find_optimal_scale_factor(y_val, val_conc, val_rate)
+        print(f"    Optimal scale factor: {scale_factor:.2f}")
+
+        # Evaluate both splits with calibration
+        for split_name, conc, rate, y, split_df in [
+            ("val", val_conc, val_rate, y_val, val_df),
+            ("test", test_conc, test_rate, y_test, test_df),
+        ]:
+            metrics, pred_q = compute_metrics(y, conc, rate, split_name, scale_factor)
             metrics["horizon_days"] = horizon
+            metrics["scale_factor"] = scale_factor
             all_metrics.append(metrics)
 
-            print(f"\n  {split_name.upper()} metrics:")
+            print(f"\n  {split_name.upper()} metrics (scale_factor={scale_factor:.2f}):")
             print(f"    CRPS:        {metrics['mean_crps']:.2f}")
             print(f"    NLL:         {metrics['mean_nll']:.2f}")
             print(f"    MAE:         {metrics['mae']:.1f} mm")
@@ -560,7 +329,6 @@ def main():
             print(f"    Coverage 50: {metrics['coverage_50']:.1%}")
             print(f"    Mean obs:    {metrics['mean_observed']:.1f} mm")
             print(f"    Mean pred:   {metrics['mean_predicted']:.1f} mm")
-            # Reliability at multiple levels
             print(f"    Reliability: ", end="")
             for lev in [50, 60, 70, 80, 90, 95]:
                 key = f"cov_{lev}"
@@ -571,7 +339,56 @@ def main():
             # Generate plots for test set
             if split_name == "test":
                 print("\n  Generating diagnostic plots...")
-                plot_diagnostics(xgblss, split_df, pred_params, pred_q, feature_cols, horizon)
+
+                # Feature importance dict
+                try:
+                    booster = xgblss.booster
+                    raw_imp = booster.get_score(importance_type="gain")
+                    if raw_imp:
+                        sample_key = next(iter(raw_imp))
+                        if sample_key.startswith("f") and sample_key[1:].isdigit():
+                            feat_imp = {
+                                feature_cols[int(k[1:])]: v
+                                for k, v in raw_imp.items()
+                                if k.startswith("f") and k[1:].isdigit() and int(k[1:]) < len(feature_cols)
+                            }
+                        else:
+                            feat_imp = dict(raw_imp)
+                    else:
+                        feat_imp = None
+                except Exception:
+                    feat_imp = None
+
+                dates = split_df["init_date"].values if "init_date" in split_df.columns else None
+
+                plot_all_diagnostics(
+                    y=y,
+                    concentration=conc,
+                    rate=rate,
+                    pred_q=pred_q,
+                    dates=dates,
+                    feature_names=feature_cols,
+                    feature_importance=feat_imp,
+                    horizon=horizon,
+                    model_name="XGBoostLSS",
+                    vis_dir=VIS_DIR,
+                    scale_factor=scale_factor,
+                )
+
+                # Calibration comparison (before vs after)
+                plot_calibration_comparison(
+                    y=y,
+                    concentration=conc,
+                    rate=rate,
+                    scale_factor_before=1.0,
+                    scale_factor_after=scale_factor,
+                    horizon=horizon,
+                    model_name="XGBoostLSS",
+                    vis_dir=VIS_DIR,
+                )
+
+                # SHAP (XGBoost-specific)
+                plot_shap(xgblss, dtest, split_df, feature_cols, horizon)
 
         # Save model
         model_path = MODELS_DIR / f"xgboostlss_{horizon}d.json"
@@ -581,7 +398,7 @@ def main():
         # Save optimal params
         params_path = MODELS_DIR / f"xgboostlss_{horizon}d_params.json"
         with open(params_path, "w") as f:
-            json.dump(opt_params, f, indent=2, default=str)
+            json.dump({**opt_params, "scale_factor": scale_factor}, f, indent=2, default=str)
 
     # Save all metrics
     if all_metrics:
