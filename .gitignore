@@ -13,8 +13,10 @@ build/
 venv/
 env/
 
-# Data (too large for git)
-data/
+# Data (too large for git, but allow parquets)
+data/**
+!data/**/
+!data/**/*.parquet
 
 # Logs
 logs/
