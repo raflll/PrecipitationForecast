@@ -6,9 +6,15 @@ University of Miami
 
 This repository contains everything needed to reproduce our final-project pipeline: a probabilistic precipitation forecasting system for Miami International Airport that predicts a full Gamma distribution for cumulative rainfall at 3, 7, 14, 21, 28, and 35-day horizons.
 
-- **Final report (PDF):** [docs/final.pdf](docs/final.pdf) (compile from [docs/final.tex](docs/final.tex))
+- **Final report (PDF):** [final.pdf](final.pdf) — at the repo root for easy navigation
 - **Presentation deck:** [docs/Weather_Group_Presentation.pptx](docs/Weather_Group_Presentation.pptx)
 - **Midterm report:** [docs/midterm.pdf](docs/midterm.pdf) (the final report extends this)
+- **LaTeX sources:** [docs/tex/final.tex](docs/tex/final.tex), [docs/tex/midterm.tex](docs/tex/midterm.tex)
+
+To rebuild `final.pdf`:
+```bash
+cd docs/tex && pdflatex --output-directory=../.. final.tex && pdflatex --output-directory=../.. final.tex
+```
 
 ## Highlights
 
@@ -21,9 +27,12 @@ This repository contains everything needed to reproduce our final-project pipeli
 
 ```
 GroupProject/
+├── final.pdf                      # ← THE final report (start here)
 ├── docs/                          # Submission deliverables
-│   ├── final.tex / final.pdf      # Final report (extends the midterm)
-│   ├── midterm.tex / midterm.pdf  # Original midterm report
+│   ├── tex/
+│   │   ├── final.tex              # LaTeX source for final.pdf
+│   │   └── midterm.tex            # LaTeX source for midterm.pdf
+│   ├── midterm.pdf                # Original midterm report (the final extends this)
 │   ├── Weather_Group_Presentation.pptx
 │   ├── MODEL_CARD.md              # Full feature catalog and model details
 │   └── DATA_SOURCES.md            # Technical reference for data sources

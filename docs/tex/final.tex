@@ -10,7 +10,7 @@
 \usepackage{subcaption}
 \usepackage{xcolor}
 \usepackage{enumitem}
-\graphicspath{{../visualizations/}}
+\graphicspath{{../../visualizations/}}
 
 \begin{document}
 
@@ -153,7 +153,7 @@ Figure~\ref{fig:head-to-head-scatter} drills into per-prediction accuracy with a
 
 Table~\ref{tab:comparison-crps-test} reports test-set CRPS for every model at every horizon, with the best in bold, and Figure~\ref{fig:comparison-panel} extends the comparison to NLL, MAE, and 90\% prediction-interval coverage as a function of horizon.
 
-\input{../visualizations/model_comparison_test_table.tex}
+\input{../../visualizations/model_comparison_test_table.tex}
 
 \textbf{XGBoost-Gamma is the best model at five out of six horizons} on the held-out 2025 test set, with CRPS of 6.48 (3d), 13.34 (7d), 21.72 (14d), 28.46 (21d), 31.71 (28d), and 36.16 (35d). The 14d horizon is the only one where another model wins (XGBoostLSS at 21.08, narrowly), and we did not retrain XGBoostLSS at the other horizons in time for this submission, so this is a tie rather than a contradiction. The GAMLSS 2-stage model is consistently second, never far behind XGBoost-Gamma.
 
@@ -222,7 +222,7 @@ Figure~\ref{fig:skill-vs-horizon} normalizes CRPS by the climatology baseline to
     \item \textbf{Physical post-processing constraints.} Add side-constraints to ensure that, e.g., a 7-day prediction is always less than a 14-day prediction starting on the same date. The current models do not enforce this; cumulative monotonicity would be a free quality improvement.
 \end{itemize}
 
-\textbf{Repository.} All code, processed data instructions, trained model artifacts, the presentation, and this report are organised per the assignment requirements with \texttt{docs/} (presentation + report), \texttt{data/} (with download instructions), \texttt{src/} (training code), and \texttt{scripts/} (data collection, processing, baselines, and visualization helpers).
+\textbf{Repository.} The compiled report sits at the repository root as \texttt{final.pdf}, with the LaTeX sources in \texttt{docs/tex/}; the presentation deck and supporting technical documentation live in \texttt{docs/}; data download instructions are in the README; \texttt{src/} contains training code and \texttt{scripts/} contains the data-collection, processing, baseline, and visualization helpers used to reproduce every figure and table in this report.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \bibliographystyle{plainnat}
