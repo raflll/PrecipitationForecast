@@ -11,11 +11,6 @@ This repository contains everything needed to reproduce our final-project pipeli
 - **Midterm report:** [docs/midterm.pdf](docs/midterm.pdf) (the final report extends this)
 - **LaTeX sources:** [docs/tex/final.tex](docs/tex/final.tex), [docs/tex/midterm.tex](docs/tex/midterm.tex)
 
-To rebuild `final.pdf`:
-```bash
-cd docs/tex && pdflatex --output-directory=../.. final.tex && pdflatex --output-directory=../.. final.tex
-```
-
 ## Highlights
 
 - **Models:** three distributional ML models (XGBoost-Gamma, GAMLSS 2-stage, XGBoostLSS) compared against three classical baselines (climatology, raw GEFS dressing, EMOS-Gamma).
