@@ -1,0 +1,16 @@
+{
+  "objective": "reg:gamma",
+  "eval_metric": "gamma-nloglik",
+  "eta": 0.2,
+  "max_depth": 4,
+  "gamma": 1e-08,
+  "subsample": 0.5,
+  "colsample_bytree": 0.3,
+  "min_child_weight": 10,
+  "reg_alpha": 0.01,
+  "reg_lambda": 46.1665,
+  "seed": 42,
+  "nthread": 31,
+  "gamma_shape": 13.7617,
+  "n_rounds": 153
+}

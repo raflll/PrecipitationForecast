@@ -1,215 +1,175 @@
-# Miami Probabilistic Precipitation Forecasting
+# Probabilistic Precipitation Forecasting for Miami
 
-Probabilistic precipitation forecasting for Miami using XGBoostLSS, GAMLSS, and XGBoost Gamma models with GEFS ensemble weather data. Each model predicts full Gamma probability distributions for cumulative rainfall over 3 to 35-day horizons.
+**CSC542 — Statistical Learning with Applications · Spring 2026**
+Justin Bonner, Arian Djahed, Alex Morrow · Instructor: Vanessa Aguiar
+University of Miami
 
-## Quick Start: Training Models
+This repository contains everything needed to reproduce our final-project pipeline: a probabilistic precipitation forecasting system for Miami International Airport that predicts a full Gamma distribution for cumulative rainfall at 3, 7, 14, 21, 28, and 35-day horizons.
 
-### Prerequisites
+- **Final report (PDF):** [docs/final.pdf](docs/final.pdf) (compile from [docs/final.tex](docs/final.tex))
+- **Presentation deck:** [docs/Weather_Group_Presentation.pptx](docs/Weather_Group_Presentation.pptx)
+- **Midterm report:** [docs/midterm.pdf](docs/midterm.pdf) (the final report extends this)
 
-```bash
-# Python dependencies
-pip install -r requirements.txt
+## Highlights
 
-# R dependencies (install from R console)
-install.packages(c("arrow", "xgboost", "data.table", "ggplot2",
-                    "shapviz", "patchwork", "scoringRules", "scales", "jsonlite"))
-```
+- **Models:** three distributional ML models (XGBoost-Gamma, GAMLSS 2-stage, XGBoostLSS) compared against three classical baselines (climatology, raw GEFS dressing, EMOS-Gamma).
+- **Best result:** XGBoost-Gamma wins on test-set CRPS at five of six horizons. At the 14-day horizon, CRPS = 21.7 mm, a 10% improvement over climatology and 30% over raw GEFS.
+- **Calibration:** all ML models reach 86–98% empirical coverage at the nominal 90% prediction interval after post-hoc variance calibration.
+- **Data:** 49,470 (init\_date, horizon) records from 2000–2025, built from NOAA station observations, Open-Meteo archive data, GEFS reforecast (2000–2019), and GEFS operational (2020+).
 
-The training dataset must exist at `data/training/training_dataset.parquet`. If it doesn't, follow the [full pipeline steps](#reproducing-the-pipeline) below.
-
-### Train XGBoostLSS (Python)
-
-```bash
-# Train all horizons (3, 7, 14, 21, 28, 35 days)
-python src/train_xgboostlss.py
-
-# Single horizon
-python src/train_xgboostlss.py --horizon 14
-
-# Quick test run (fewer Optuna trials, faster)
-python src/train_xgboostlss.py --horizon 14 --quick
-```
-
-Outputs: `models/xgboostlss_*d.json`, `models/all_metrics.csv`, `visualizations/xgboostlss_*d_*.png`
-
-### Train GAMLSS (R)
-
-```bash
-# Train all horizons
-Rscript src/train_gamlss.R
-
-# Single horizon
-Rscript src/train_gamlss.R --horizon 14
-
-# Quick test run
-Rscript src/train_gamlss.R --horizon 14 --quick
-```
-
-Outputs: `models/gamlss_*d.rds`, `models/gamlss_all_metrics.csv`, `visualizations/gamlss_*d_*.png`
-
-### Train XGBoost Gamma (R)
-
-```bash
-Rscript src/train_xgboost_gamma.R
-Rscript src/train_xgboost_gamma.R --horizon 14
-Rscript src/train_xgboost_gamma.R --quick
-```
-
-Outputs: `models/xgboost_gamma_*d.rds`, `visualizations/xgboost_gamma_*d_*.png`
-
-### Compare Models
-
-After training multiple models, generate comparison charts:
-
-```bash
-python scripts/visualizations/model_comparison.py
-python scripts/visualizations/coverage_by_horizon.py
-```
-
-### What Each Model Produces
-
-All models generate the same set of diagnostic plots per horizon:
-
-| Plot | Description |
-|------|-------------|
-| `*_pred_vs_obs.png` | Predicted vs observed scatter with LOESS fit |
-| `*_intervals.png` | Full-year prediction intervals (90% and 50% PI) |
-| `*_pit.png` | PIT histogram (calibration diagnostic) |
-| `*_reliability.png` | Reliability diagram with tolerance band |
-| `*_importance.png` | Top 25 features by XGBoost gain |
-| `*_shap_beeswarm.png` | SHAP beeswarm plot |
-| `*_residuals.png` | Residual distribution |
-| `*_monthly.png` | Monthly observed vs predicted bars |
-
----
-
-## Overview
-
-This project builds a machine learning pipeline that combines NOAA station observations (1948-present) with GEFS ensemble forecast data (2000-present) to produce calibrated probabilistic precipitation forecasts for Miami International Airport. Instead of point predictions, each model outputs Gamma distribution parameters, enabling prediction intervals and risk quantification.
-
-## Data Sources
-
-| Source | Coverage | Auth | Description |
-|--------|----------|------|-------------|
-| [NOAA CDO](https://www.ncdc.noaa.gov/cdo-web/) | 1948-present | API token | Daily precipitation, temperature, weather types from station USW00012839 (Miami Intl Airport) |
-| [Open-Meteo](https://open-meteo.com/) | 1940-present | None | Daily temperature, wind, sunshine, precipitation hours |
-| [GEFS Reforecast](https://noaa-gefs-retrospective.s3.amazonaws.com/) | 2000-2019 | None | Wednesday-only 35-day ensemble forecasts (11 members) from AWS S3 |
-| [GEFS Operational](https://www.nco.ncep.noaa.gov/pmb/products/gens/) | Sept 2020-present | None | Daily 35-day ensemble forecasts (mean + spread) via Herbie |
-
-## Project Structure
+## Repository layout
 
 ```
 GroupProject/
-├── src/
-│   ├── train_xgboostlss.py              # XGBoostLSS training (Python)
-│   ├── train_gamlss.R                    # GAMLSS 2-stage training (R)
-│   ├── train_xgboost_gamma.R             # XGBoost Gamma regression (R)
-│   ├── evaluation.py                     # Shared metrics + plotting
-│   ├── calibration.py                    # Post-hoc calibration utilities
-│   └── viz_theme.py                      # Unified visualization theme
-├── scripts/
-│   ├── data_collection/
-│   │   └── data_collection.ipynb         # Pull raw NOAA + Open-Meteo data
-│   ├── data_processing/
-│   │   ├── rebuild_miami_clean.py        # Clean/merge observations → miami_clean.csv
-│   │   └── build_training_dataset.py     # Feature engineering → training_dataset.parquet
-│   ├── pull_gefs_reforecast.py           # Download GEFS reforecast data (2000-2019)
-│   ├── pull_gefs_operational.py          # Download GEFS operational data (2020+)
-│   └── visualizations/
-│       ├── miami_monthly_rainfall_histogram.py
-│       ├── monthly_precipitation_comparison.py
-│       ├── model_comparison.py           # Cross-model metric comparison
-│       └── coverage_by_horizon.py        # Coverage summary across horizons
-├── data/                                 # All data (gitignored)
-│   ├── noaa/                             # Raw NOAA station data
-│   ├── open-meteo/                       # Raw Open-Meteo data
-│   ├── miami_clean.csv                   # Cleaned daily observations
-│   ├── GEFS_Reforecast/                  # Reforecast parquets by year
-│   ├── GEFS_Operational/                 # Operational parquets by year
-│   └── training/
-│       └── training_dataset.parquet      # Final ML-ready dataset
-├── models/                               # Trained models + metrics (gitignored)
-├── visualizations/                       # Generated plots (gitignored)
-├── docs/
-│   ├── MODEL_CARD.md                     # Feature documentation + model details
-│   └── DATA_SOURCES.md                   # Data source technical reference
-└── requirements.txt
+├── docs/                          # Submission deliverables
+│   ├── final.tex / final.pdf      # Final report (extends the midterm)
+│   ├── midterm.tex / midterm.pdf  # Original midterm report
+│   ├── Weather_Group_Presentation.pptx
+│   ├── MODEL_CARD.md              # Full feature catalog and model details
+│   └── DATA_SOURCES.md            # Technical reference for data sources
+├── src/                           # Main training / evaluation code
+│   ├── train_xgboost_gamma.R      # Best model: XGBoost reg:gamma + MLE shape
+│   ├── train_gamlss.R             # GAMLSS 2-stage XGBoost
+│   ├── train_xgboostlss.py        # XGBoostLSS (Python)
+│   ├── evaluation.py              # Shared metrics + diagnostic plotting
+│   ├── calibration.py             # Post-hoc variance scaling
+│   └── viz_theme.py               # Unified plot theme
+├── scripts/                       # Pipeline scripts (data + helpers)
+│   ├── data_collection/           # NOAA + Open-Meteo pulls
+│   ├── data_processing/           # Cleaning, feature engineering
+│   ├── pull_gefs_*.py             # GEFS data downloads (S3 + Herbie)
+│   ├── baselines/
+│   │   ├── run_sota_baselines.py        # Climatology + Raw-GEFS + EMOS-Gamma
+│   │   └── build_model_comparison.py    # Combined metrics CSV + comparison chart
+│   └── visualizations/            # Comparison plots, histograms
+├── data/                          # See "Getting the data" below
+├── models/                        # Trained model artifacts + metric CSVs
+├── visualizations/                # All generated plots
+├── requirements.txt
+└── README.md
 ```
 
-## Setup
+The repo follows the assignment-required structure: `docs/` for the report and presentation, `data/` (or download instructions, see below), `src/` for source code.
+
+## Getting the data
+
+Raw GEFS data is too large to commit (≈40 GB across all years). The processed training parquet that all models load is small (~80 MB) and **is** included at `data/training/training_dataset.parquet`.
+
+### Option A — use the processed parquet (recommended for graders)
+
+It is already in the repo. Just clone and run training. No external accounts or downloads needed.
+
+### Option B — rebuild the dataset end-to-end
+
+Reproducing from raw sources requires:
+
+1. **NOAA CDO API token.** Free at <https://www.ncdc.noaa.gov/cdo-web/token>. Save in a `.env` file:
+   ```
+   NOAA_TOKEN=your_token_here
+   ```
+2. **Run the pipeline** (each step is idempotent and resumable):
+   ```bash
+   # 1. Daily observations
+   jupyter notebook scripts/data_collection/data_collection.ipynb
+   python scripts/data_processing/rebuild_miami_clean.py
+
+   # 2. GEFS forecasts (pulls in chunks; will resume on rerun)
+   python scripts/pull_gefs_reforecast.py --start-year 2000 --end-year 2019
+   python scripts/pull_gefs_operational.py 2024
+   python scripts/pull_gefs_operational.py 2025
+
+   # 3. Feature engineering
+   python scripts/data_processing/build_training_dataset.py
+   ```
+   Output: `data/training/training_dataset.parquet`.
+
+The full data-source reference (URLs, station IDs, rate-limit caveats, GRIB2 conventions, etc.) is in [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md).
+
+## Quick start
+
+### Install dependencies
 
 ```bash
-# Create and activate virtual environment
+# Python
 python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate   # Windows
-
-# Install dependencies
+source .venv/bin/activate    # or: .venv\Scripts\activate on Windows
 pip install -r requirements.txt
+
+# R packages (run from R console)
+install.packages(c("arrow", "xgboost", "data.table", "ggplot2",
+                   "shapviz", "patchwork", "scoringRules", "scales", "jsonlite"))
 ```
 
-A NOAA CDO API token is required for raw data collection. Get one at https://www.ncdc.noaa.gov/cdo-web/token and save it in a `.env` file:
-
-```
-NOAA_TOKEN=your_token_here
-```
-
-## Reproducing the Pipeline
-
-### Step 1: Collect raw observations
-
-Open `scripts/data_collection/data_collection.ipynb` in Jupyter and run all cells. This pulls daily weather data from NOAA CDO and Open-Meteo into `data/noaa/` and `data/open-meteo/`.
+### Train the best model
 
 ```bash
-jupyter notebook scripts/data_collection/data_collection.ipynb
+# Train XGBoost-Gamma at all six horizons (R)
+Rscript src/train_xgboost_gamma.R
+
+# Or just one horizon
+Rscript src/train_xgboost_gamma.R --horizon 14
+
+# Quick test run (faster, fewer trials)
+Rscript src/train_xgboost_gamma.R --horizon 14 --quick
 ```
 
-### Step 2: Clean and merge observations
+Outputs go to `models/xgboost_gamma_*.json` and `visualizations/xgboost_gamma_*.png`. Training metrics are appended to `models/all_metrics_r.csv`.
+
+### Train the other two ML models
 
 ```bash
-python scripts/data_processing/rebuild_miami_clean.py
+Rscript src/train_gamlss.R                 # GAMLSS 2-stage (R)
+python src/train_xgboostlss.py             # XGBoostLSS (Python)
 ```
 
-Merges NOAA and Open-Meteo data, adds weather type flags, and outputs `data/miami_clean.csv`.
-
-### Step 3: Download GEFS forecast data
+### Run the SOTA baselines
 
 ```bash
-# Reforecast data (2000-2019, Wednesday-only, downloads from S3)
-python scripts/pull_gefs_reforecast.py --start-year 2000 --end-year 2019
-
-# Operational data (one year at a time, downloads via Herbie)
-python scripts/pull_gefs_operational.py 2024
+python scripts/baselines/run_sota_baselines.py
 ```
 
-Both scripts support resuming from where they left off if interrupted.
+This fits and evaluates climatology, raw GEFS dressing, and EMOS-Gamma on the same train/val/test split as the ML models. Output: `models/baselines_metrics.csv`.
 
-### Step 4: Build training dataset
+### Build the comparison table and chart
 
 ```bash
-python scripts/data_processing/build_training_dataset.py
+python scripts/baselines/build_model_comparison.py
 ```
 
-Engineers 125+ features from observations and GEFS data across 6 forecast horizons (3, 7, 14, 21, 28, 35 days). Outputs `data/training/training_dataset.parquet`. See [docs/MODEL_CARD.md](docs/MODEL_CARD.md) for the full feature list.
+Combines all model metrics into `models/comparison_metrics.csv` and emits the multi-panel comparison chart used in the report:
 
-### Step 5: Train models
+- `visualizations/model_comparison_panel_test.png`
+- `visualizations/model_comparison_panel_val.png`
+- `visualizations/model_comparison_test_table.tex` (LaTeX fragment)
 
-See [Quick Start](#quick-start-training-models) above for all training commands. All three models support `--horizon N` and `--quick` flags.
+## Models in this comparison
 
-## Models
+| ID | Model | Lang | Approach |
+|----|-------|------|----------|
+| B1 | Climatology | Python | Gamma fit to historical observations in a ±15-day DOY window |
+| B2 | Raw GEFS dressing | Python | Method-of-moments Gamma from ensemble mean / spread |
+| B3 | EMOS-Gamma | Python | Non-homogeneous Gamma regression, min-CRPS fit |
+| M1 | **XGBoost-Gamma** (best) | R | XGBoost `reg:gamma` + MLE shape from residuals |
+| M2 | GAMLSS 2-stage | R | XGBoost mean on log1p(y) + XGBoost spread on |residuals| |
+| M3 | XGBoostLSS | Python | Direct Gamma NLL via XGBoostLSS library |
 
-Three distributional regression models, all outputting Gamma distribution parameters for uncertainty quantification:
+All ML models include post-hoc variance scaling on the validation set to calibrate the 90% prediction interval. Splits: train 2000–2023, validation 2024, test 2025. See [docs/MODEL_CARD.md](docs/MODEL_CARD.md) for the 132-feature catalog and full hyperparameter spec.
 
-| Model | Language | Approach | Tuning |
-|-------|----------|----------|--------|
-| **XGBoostLSS** | Python | Direct Gamma NLL via XGBoostLSS library | Optuna (30 trials, 3-fold CV) |
-| **GAMLSS** | R | 2-stage: XGBoost mean on log1p(precip) + XGBoost variance on CV residuals | Random search (40 + 20 trials) |
-| **XGBoost Gamma** | R | Native `reg:gamma` objective + MLE shape from residuals | Bayesian optimization (30 trials) |
+## Top-line results (test set, 2025 held-out)
 
-All models include post-hoc variance scaling calibration on the validation set to improve prediction interval coverage.
+CRPS by horizon (lower is better; best in **bold**):
 
-- **Horizons**: 3, 7, 14, 21, 28, 35 days
-- **Train**: 2019, 2022 | **Validation**: held-out from train | **Test**: 2025
-- **Features**: 132 engineered features across forecast, climatology, recent conditions, calendar, bias correction, and cross-feature categories
+| Model              |  3d  |  7d  | 14d  | 21d  | 28d  | 35d  |
+|--------------------|-----:|-----:|-----:|-----:|-----:|-----:|
+| Climatology        | 9.21 | 15.92| 24.21| 30.39| 35.35| 38.78|
+| Raw GEFS           | 7.46 | 15.83| 30.92| 53.06| 76.46| 101.02|
+| EMOS-Gamma         | 6.60 | 13.81| 24.46| 36.95| 48.46| 58.70 |
+| **XGBoost-Gamma**  | **6.48** | **13.34** | 21.72 | **28.46** | **31.71** | **36.16** |
+| GAMLSS 2-stage     | 7.79 | 15.30| 23.32| 28.63| 35.77| 36.91 |
+| XGBoostLSS (14d only) | — | — | **21.08** | — | — | — |
 
-See [docs/MODEL_CARD.md](docs/MODEL_CARD.md) for complete feature documentation and model details.
+Full results with NLL, MAE, bias, and 50/60/70/80/90/95% prediction-interval coverage are in `models/comparison_metrics.csv` and Figure 2 of the final report.
+
+## License & contact
+
+Course project, Spring 2026. For questions, open an issue or contact justin@propagenticai.com.

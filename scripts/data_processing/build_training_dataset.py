@@ -48,14 +48,44 @@ def load_miami_clean() -> pd.DataFrame:
     return df
 
 
+def load_miami_hourly() -> pd.Series | None:
+    """Load hourly precipitation (UTC) indexed by timestamp. Used to fill partial
+    days at GEFS cycle boundaries (06/12/18Z) where daily NOAA totals don't align.
+
+    Returns None if the file is missing — callers should then fall back to
+    daily-only ground truth and drop non-00Z rows.
+    """
+    path = DATA_DIR / "open-meteo" / "miami_hourly.csv"
+    if not path.exists():
+        print(f"  WARNING: {path} not found. Run pull_miami_hourly_precip.py first.")
+        print("           Non-00Z cycles will be dropped from the dataset.")
+        return None
+    df = pd.read_csv(path, parse_dates=["time"])
+    df = df.sort_values("time").reset_index(drop=True)
+    s = df.set_index("time")["precipitation"].astype(float)
+    print(f"  Loaded {len(s):,} hourly precip rows "
+          f"({s.index.min()} to {s.index.max()} UTC)")
+    return s
+
+
+def _parse_cycle_from_filename(name: str) -> int | None:
+    """Parse cycle (0/6/12/18) from operational parquet filename, or None if not present."""
+    import re
+    m = re.search(r"_(\d{2})z_", name)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def load_gefs_data() -> pd.DataFrame:
-    """Load all GEFS parquet files (reforecast + operational), tag with source."""
+    """Load all GEFS parquet files (reforecast + operational), tag with source + cycle."""
     frames = []
 
     reforecast_dir = DATA_DIR / "GEFS_Reforecast"
     for f in sorted(reforecast_dir.glob("gefs_reforecast_*.parquet")):
         df = pd.read_parquet(f)
         df["source"] = "reforecast"
+        df["cycle"] = 0
         frames.append(df)
 
     operational_dir = DATA_DIR / "GEFS_Operational"
@@ -64,6 +94,11 @@ def load_gefs_data() -> pd.DataFrame:
             continue
         df = pd.read_parquet(f)
         df["source"] = "operational"
+        cycle = _parse_cycle_from_filename(f.name)
+        if cycle is None:
+            # Old naming convention (gefs_operational_YYYY.parquet) = 00Z
+            cycle = 0
+        df["cycle"] = cycle
         frames.append(df)
 
     if not frames:
@@ -72,10 +107,18 @@ def load_gefs_data() -> pd.DataFrame:
 
     combined = pd.concat(frames, ignore_index=True)
     combined["init_date"] = pd.to_datetime(combined["init_date"])
+    # Sanity check: init_date.hour should match cycle tag
+    hour_mismatch = (combined["init_date"].dt.hour != combined["cycle"]).sum()
+    if hour_mismatch:
+        print(f"  WARNING: {hour_mismatch} rows have init_date.hour != cycle — "
+              f"using init_date.hour as authoritative")
+        combined["cycle"] = combined["init_date"].dt.hour
     combined = combined.sort_values(["init_date", "forecast_hour"]).reset_index(drop=True)
     print(f"  Loaded {len(combined):,} GEFS rows, "
-          f"{combined['init_date'].nunique()} unique init dates "
-          f"({combined['init_date'].min().date()} to {combined['init_date'].max().date()})")
+          f"{combined['init_date'].nunique()} unique init datetimes "
+          f"({combined['init_date'].min()} to {combined['init_date'].max()})")
+    cycle_counts = combined.groupby("cycle")["init_date"].nunique().to_dict()
+    print(f"  Cycle distribution (unique init datetimes): {cycle_counts}")
     return combined
 
 
@@ -83,23 +126,95 @@ def load_gefs_data() -> pd.DataFrame:
 # 2. Ground truth computation
 # ---------------------------------------------------------------------------
 
-def compute_ground_truths(miami: pd.DataFrame, init_dates: pd.Series) -> pd.DataFrame:
-    """Compute cumulative observed precipitation for each (init_date, horizon)."""
-    miami_indexed = miami.set_index("date")["noaa_PRCP"]
+def compute_ground_truths(
+    miami: pd.DataFrame,
+    init_dates: pd.Series,
+    hourly: pd.Series | None = None,
+) -> pd.DataFrame:
+    """Compute cumulative observed precipitation for each (init_date, horizon).
+
+    Strategy:
+      - Forecast window = [init_date, init_date + h*24h) in UTC.
+      - For 00Z inits the window is whole UTC days, so we sum daily NOAA_PRCP.
+      - For non-00Z inits the window starts/ends mid-day. We use daily NOAA for
+        the FULL UTC-midnight-to-midnight days in the middle and Open-Meteo
+        hourly precipitation to fill the partial day at each bookend. This
+        preserves NOAA daily as authoritative where it covers the window and
+        only pulls in hourly data for the unaligned edges.
+
+    If `hourly` is None, non-00Z rows are skipped.
+    """
+    daily = miami.set_index("date")["noaa_PRCP"]
 
     rows = []
+    skipped_no_daily = 0
+    skipped_no_hourly = 0
+
     for init_date in init_dates:
+        init_ts = pd.Timestamp(init_date)
         for h in HORIZONS:
-            end_date = init_date + pd.Timedelta(days=h - 1)
-            date_range = pd.date_range(init_date, end_date, freq="D")
-            if not all(d in miami_indexed.index for d in date_range):
-                continue
-            total = miami_indexed.loc[date_range].sum() + EPSILON
+            window_start = init_ts
+            window_end = init_ts + pd.Timedelta(days=h)  # exclusive
+
+            # Whole UTC days fully inside [start, end)
+            first_full_day = window_start.normalize()
+            if window_start != first_full_day:
+                first_full_day = first_full_day + pd.Timedelta(days=1)
+            last_full_day_exclusive = window_end.normalize()  # exclusive
+
+            full_days = pd.date_range(
+                first_full_day, last_full_day_exclusive - pd.Timedelta(days=1), freq="D"
+            )
+
+            # Daily portion
+            if len(full_days) > 0:
+                if not all(d in daily.index for d in full_days):
+                    skipped_no_daily += 1
+                    continue
+                daily_total = float(daily.loc[full_days].sum())
+            else:
+                daily_total = 0.0
+
+            # Hourly bookends (only present when init_date is not midnight)
+            head_start = window_start
+            head_end = first_full_day  # exclusive
+            tail_start = last_full_day_exclusive
+            tail_end = window_end  # exclusive
+
+            head_total = 0.0
+            tail_total = 0.0
+            needs_hourly = (head_end > head_start) or (tail_end > tail_start)
+
+            if needs_hourly:
+                if hourly is None:
+                    skipped_no_hourly += 1
+                    continue
+                if head_end > head_start:
+                    chunk = hourly.loc[head_start:head_end - pd.Timedelta(hours=1)]
+                    expected = int((head_end - head_start) / pd.Timedelta(hours=1))
+                    if len(chunk) < expected or chunk.isna().any():
+                        skipped_no_hourly += 1
+                        continue
+                    head_total = float(chunk.sum())
+                if tail_end > tail_start:
+                    chunk = hourly.loc[tail_start:tail_end - pd.Timedelta(hours=1)]
+                    expected = int((tail_end - tail_start) / pd.Timedelta(hours=1))
+                    if len(chunk) < expected or chunk.isna().any():
+                        skipped_no_hourly += 1
+                        continue
+                    tail_total = float(chunk.sum())
+
+            total = daily_total + head_total + tail_total + EPSILON
             rows.append({
                 "init_date": init_date,
                 "horizon_days": h,
                 "ground_truth_precip": total,
             })
+
+    if skipped_no_daily:
+        print(f"    Skipped {skipped_no_daily} (init, horizon) pairs missing daily data")
+    if skipped_no_hourly:
+        print(f"    Skipped {skipped_no_hourly} (init, horizon) pairs missing hourly data")
 
     return pd.DataFrame(rows)
 
@@ -121,6 +236,7 @@ def compute_forecast_features(gefs: pd.DataFrame, init_dates: pd.Series) -> pd.D
             continue
         grp = gefs_grouped[init_date]
         source = grp["source"].iloc[0]
+        cycle = int(grp["cycle"].iloc[0]) if "cycle" in grp.columns else pd.Timestamp(init_date).hour
 
         for h in HORIZONS:
             max_hour = h * 24
@@ -142,6 +258,7 @@ def compute_forecast_features(gefs: pd.DataFrame, init_dates: pd.Series) -> pd.D
                 "init_date": init_date,
                 "horizon_days": h,
                 "source": source,
+                "cycle": cycle,
                 # --- Primary accumulations ---
                 "cum_apcp_mean": cum_mean,
                 "cum_apcp_spread_linear": cum_spread_linear,
@@ -396,12 +513,16 @@ def compute_recent_conditions(miami: pd.DataFrame, init_dates: pd.Series) -> pd.
     rows = []
     for init_date in init_dates:
         row = {"init_date": init_date}
-        doy = init_date.timetuple().tm_yday
+        # Anchor lookback to the calendar day of init (drop hour) so we hit
+        # the midnight-indexed daily observations. For 06/12/18Z cycles the
+        # ~6-18h offset is negligible vs 7/14/30-day lookbacks.
+        init_day = pd.Timestamp(init_date).normalize()
+        doy = init_day.timetuple().tm_yday
 
         # Helper: get values for a lookback window
         def _get_window(lookback):
-            start = init_date - pd.Timedelta(days=lookback)
-            end = init_date - pd.Timedelta(days=1)
+            start = init_day - pd.Timedelta(days=lookback)
+            end = init_day - pd.Timedelta(days=1)
             dr = pd.date_range(start, end, freq="D")
             return [d for d in dr if d in miami_indexed.index]
 
@@ -453,7 +574,7 @@ def compute_recent_conditions(miami: pd.DataFrame, init_dates: pd.Series) -> pd.
         # --- Days since rain ---
         days_since = np.nan
         for offset in range(1, 61):
-            check_date = init_date - pd.Timedelta(days=offset)
+            check_date = init_day - pd.Timedelta(days=offset)
             if check_date in miami_indexed.index:
                 if miami_indexed.loc[check_date, "noaa_PRCP"] > 0:
                     days_since = offset - 1
@@ -466,7 +587,7 @@ def compute_recent_conditions(miami: pd.DataFrame, init_dates: pd.Series) -> pd.
 
         # --- Lag precipitation (individual days) ---
         for lag in [1, 2, 3, 7, 14]:
-            lag_date = init_date - pd.Timedelta(days=lag)
+            lag_date = init_day - pd.Timedelta(days=lag)
             if lag_date in miami_indexed.index:
                 row[f"precip_lag_{lag}d"] = float(miami_indexed.loc[lag_date, "noaa_PRCP"])
             else:
@@ -744,12 +865,15 @@ def main():
     print("\n[2/6] Loading GEFS parquet files...")
     gefs = load_gefs_data()
 
+    print("\n  Loading hourly precipitation (for non-00Z cycle ground truth)...")
+    hourly = load_miami_hourly()
+
     init_dates = gefs["init_date"].unique()
     init_dates = pd.Series(sorted(init_dates))
-    print(f"  Processing {len(init_dates)} unique init dates")
+    print(f"  Processing {len(init_dates)} unique init datetimes")
 
-    print("\n[3/6] Computing ground truths...")
-    gt_df = compute_ground_truths(miami, init_dates)
+    print("\n[3/6] Computing ground truths (hybrid daily+hourly)...")
+    gt_df = compute_ground_truths(miami, init_dates, hourly=hourly)
     print(f"  {len(gt_df):,} ground truth rows")
 
     print("\n[4/6] Computing forecast features...")

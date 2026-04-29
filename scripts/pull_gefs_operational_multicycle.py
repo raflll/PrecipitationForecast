@@ -193,11 +193,16 @@ def fetch_apcp_single(
                     time.sleep(exponential_backoff(attempt))
                 continue
 
-            # 4. Decode GRIB message and extract Miami point
+            # 4. Validate GRIB magic bytes before decoding
+            content = data_resp.content
+            if len(content) < 4 or not content.startswith(b"GRIB"):
+                logger.debug(f"Non-GRIB response for {member_type} fxx={fxx} (len={len(content)})")
+                return np.nan
+
             tmp_fd, tmp_path = tempfile.mkstemp(suffix=".grib2")
             os.close(tmp_fd)
             with open(tmp_path, "wb") as f:
-                f.write(data_resp.content)
+                f.write(content)
 
             ds = xr.open_dataset(tmp_path, engine="cfgrib")
 

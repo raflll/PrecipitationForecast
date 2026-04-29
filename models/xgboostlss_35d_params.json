@@ -1,0 +1,15 @@
+{
+  "eta": 0.09940816508994038,
+  "max_depth": 4,
+  "gamma": 0.1205345104248625,
+  "subsample": 0.8383844334559684,
+  "colsample_bytree": 0.39115511285006993,
+  "min_child_weight": 296.9878518440772,
+  "reg_alpha": 1.1943112620399969e-08,
+  "reg_lambda": 7.923177944955283e-08,
+  "booster": "gbtree",
+  "objective": null,
+  "base_score": 0,
+  "num_target": 2,
+  "disable_default_eval_metric": true
+}

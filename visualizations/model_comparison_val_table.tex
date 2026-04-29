@@ -1,0 +1,18 @@
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & 3d & 7d & 14d & 21d & 28d & 35d \\
+\midrule
+Climatology & 10.62 & 18.56 & 28.86 & 36.64 & 41.94 & 44.84 \\
+Raw GEFS & 8.46 & 17.76 & 36.20 & 59.89 & 85.15 & 111.57 \\
+EMOS-Gamma & 7.50 & \textbf{15.84} & 30.19 & 43.65 & 55.64 & 66.03 \\
+XGBoost-Gamma (R) & \textbf{7.40} & 16.88 & \textbf{26.36} & 35.43 & \textbf{37.50} & \textbf{38.91} \\
+GAMLSS 2-stage (R) & 9.58 & 18.77 & 27.66 & \textbf{35.10} & 39.90 & 40.15 \\
+XGBoostLSS (Py) & -- & -- & 26.51 & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\caption{Mean CRPS by forecast horizon on the val set (2025 held-out for test, 2024 for validation). Lower is better; the best in each column is in bold. `--' marks horizons not retrained for this comparison.}
+\label{tab:comparison-crps-val}
+\end{table}

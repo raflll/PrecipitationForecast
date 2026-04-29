@@ -203,13 +203,16 @@ train_model <- function(train_dt, val_dt, feature_cols, horizon, quick = FALSE) 
   X_val   <- as.matrix(val_dt[, ..feature_cols])
   y_val   <- val_dt$ground_truth_precip
 
+  colnames(X_train) <- feature_cols
+  colnames(X_val)   <- feature_cols
   dtrain <- xgb.DMatrix(X_train, label = y_train)
   dval   <- xgb.DMatrix(X_val,   label = y_val)
 
-  n_trials   <- if (quick) 10L else 30L
+  n_trials   <- if (quick) 15L else 30L
   max_rounds <- if (quick) 100L else 500L
-  n_init     <- min(5L, n_trials)
-  n_iter     <- n_trials - n_init
+  # ParBayesianOptimization requires initPoints > number of bounds (8 here).
+  n_init     <- 10L
+  n_iter     <- max(1L, n_trials - n_init)
 
   cat(sprintf("  Running Bayesian HP optimization (%d trials)...\n", n_trials))
 
@@ -329,8 +332,53 @@ train_model <- function(train_dt, val_dt, feature_cols, horizon, quick = FALSE) 
 # Model Evaluation
 # ==============================================================================
 
-evaluate_model <- function(model, shape, df, feature_cols, split_name) {
+#' Find a scale factor s that widens the Gamma predictive distribution so the
+#' validation PIT is as close to Uniform(0,1) as possible.
+#'
+#' Mean-preserving variance scaling: shape_eff = shape/s^2, rate_eff = rate/s^2.
+#' Keeps mean = shape/rate unchanged while multiplying variance by s^2.
+#'
+#' Objective options:
+#'   - "ks"   : minimise KS distance between PIT and Uniform (flattens whole PIT)
+#'   - "cov"  : minimise |coverage_at_target - target| (only ties one level)
+find_optimal_scale_factor <- function(y, shape, rate,
+                                      objective = c("ks", "cov"),
+                                      target_coverage = 0.90,
+                                      search_range = c(0.3, 15.0),
+                                      step = 0.05) {
+  objective <- match.arg(objective)
+  factors <- seq(search_range[1], search_range[2], by = step)
+
+  best_sf  <- 1.0
+  best_val <- Inf
+  for (sf in factors) {
+    shape_adj <- shape / (sf^2)
+    rate_adj  <- rate  / (sf^2)
+    if (objective == "ks") {
+      pit <- pgamma(y, shape = shape_adj, rate = rate_adj)
+      pit <- pmin(pmax(pit, 1e-9), 1 - 1e-9)
+      val <- suppressWarnings(ks.test(pit, "punif"))$statistic
+    } else {
+      lo_q <- (1 - target_coverage) / 2
+      hi_q <- 1 - lo_q
+      lo <- qgamma(lo_q, shape = shape_adj, rate = rate_adj)
+      hi <- qgamma(hi_q, shape = shape_adj, rate = rate_adj)
+      cov <- mean(y >= lo & y <= hi)
+      val <- abs(cov - target_coverage)
+    }
+    if (val < best_val) {
+      best_val <- val
+      best_sf  <- sf
+    }
+  }
+  best_sf
+}
+
+
+evaluate_model <- function(model, shape, df, feature_cols, split_name,
+                           scale_factor = 1.0) {
   X <- as.matrix(df[, ..feature_cols])
+  colnames(X) <- feature_cols
   y <- df$ground_truth_precip
   dmat <- xgb.DMatrix(X, label = y)
 
@@ -338,8 +386,13 @@ evaluate_model <- function(model, shape, df, feature_cols, split_name) {
   mu <- predict(model, dmat)
 
   # Gamma parameters: shape (common), rate = shape/mu
-  rate  <- shape / mu
-  scale <- mu / shape
+  # Mean-preserving variance calibration: shape_eff = shape/sf^2, rate_eff = rate/sf^2
+  # Keeps mean = shape/rate = mu, inflates variance by sf^2.
+  rate_raw <- shape / mu
+  shape_eff <- shape    / (scale_factor^2)
+  rate      <- rate_raw / (scale_factor^2)
+  shape     <- shape_eff
+  scale     <- 1.0 / rate
 
   # Predicted quantiles
   quant_levels <- c(0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
@@ -355,7 +408,7 @@ evaluate_model <- function(model, shape, df, feature_cols, split_name) {
   nll <- pmin(pmax(nll, -100), 100)
   mean_nll <- mean(nll, na.rm = TRUE)
 
-  # Point forecast metrics
+  # Point forecast metrics — use raw mu (calibration doesn't change the point)
   mae  <- mean(abs(mu - y))
   bias <- mean(mu - y)
 
@@ -401,17 +454,61 @@ evaluate_model <- function(model, shape, df, feature_cols, split_name) {
 # Diagnostic Plots
 # ==============================================================================
 
-plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
+#' Given a validation PIT vector, return a function that maps a desired
+#' nominal level τ to the underlying Gamma-CDF level τ_raw = Q_pit(τ).
+#' Querying the Gamma at τ_raw then yields a calibrated τ-quantile on test.
+build_quantile_recalibrator <- function(pit_val) {
+  # Empirical inverse-CDF (quantile function) of val PIT, with endpoints pinned
+  # so τ in (0,1) always maps to a value in (0,1).
+  u_sorted <- sort(pit_val)
+  u_sorted <- pmin(pmax(u_sorted, 1e-6), 1 - 1e-6)
+  n <- length(u_sorted)
+  p_grid <- (seq_len(n) - 0.5) / n  # plotting positions
+  approxfun(
+    x = c(0, p_grid, 1),
+    y = c(0, u_sorted, 1),
+    method = "linear", rule = 2, ties = "ordered"
+  )
+}
+
+
+plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon,
+                             scale_factor = 1.0, val_df = NULL) {
   X_test <- as.matrix(test_df[, ..feature_cols])
+  colnames(X_test) <- feature_cols
   y      <- test_df$ground_truth_precip
   dtest  <- xgb.DMatrix(X_test, label = y)
 
   mu    <- predict(model, dtest)
-  rate  <- shape / mu
-  scale <- mu / shape
+  # Apply mean-preserving variance calibration
+  shape <- shape / (scale_factor^2)
+  rate  <- (shape / mu)
+  scale <- 1.0 / rate
+
+  # --- Quantile recalibration (learned on validation PIT) ---
+  recal <- NULL
+  pit_val <- NULL
+  if (!is.null(val_df)) {
+    X_val_m <- as.matrix(val_df[, ..feature_cols])
+    colnames(X_val_m) <- feature_cols
+    mu_val  <- predict(model, xgb.DMatrix(X_val_m,
+                                          label = val_df$ground_truth_precip))
+    rate_val <- shape / mu_val
+    pit_val  <- pgamma(val_df$ground_truth_precip, shape = shape, rate = rate_val)
+    pit_val  <- pmin(pmax(pit_val, 1e-6), 1 - 1e-6)
+    recal    <- build_quantile_recalibrator(pit_val)
+  }
 
   quant_levels <- c(0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
-  pred_q <- sapply(quant_levels, function(q) qgamma(q, shape = shape, rate = rate))
+  if (!is.null(recal)) {
+    # Map each nominal level to its empirical counterpart, then query Gamma
+    raw_levels <- recal(quant_levels)
+    pred_q <- sapply(seq_along(quant_levels), function(i) {
+      qgamma(raw_levels[i], shape = shape, rate = rate)
+    })
+  } else {
+    pred_q <- sapply(quant_levels, function(q) qgamma(q, shape = shape, rate = rate))
+  }
   colnames(pred_q) <- paste0("q", quant_levels)
 
   prefix <- file.path(VIS_DIR, paste0("xgboost_gamma_", horizon, "d"))
@@ -431,10 +528,18 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
   ggsave(paste0(prefix, "_pred_vs_obs.png"), p1, width = 8, height = 6, dpi = 200)
 
 
-  # --- 2. Prediction Intervals (first 100 test points) ---
-  n_plot <- min(100, length(y))
+  # --- 2. Prediction Intervals (all test points, date x-axis, legend) ---
+  has_dates <- "init_date" %in% names(test_df)
+  n_plot    <- length(y)  # show every test sample
+  if (has_dates) {
+    x_vals <- as.Date(test_df$init_date[1:n_plot])
+    x_lab  <- "Forecast Init Date"
+  } else {
+    x_vals <- seq_len(n_plot)
+    x_lab  <- "Test Sample Index"
+  }
   pi_df <- data.frame(
-    idx = seq_len(n_plot),
+    x   = x_vals,
     obs = y[1:n_plot],
     q05 = pred_q[1:n_plot, "q0.05"],
     q25 = pred_q[1:n_plot, "q0.25"],
@@ -442,23 +547,45 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
     q75 = pred_q[1:n_plot, "q0.75"],
     q95 = pred_q[1:n_plot, "q0.95"]
   )
-  p2 <- ggplot(pi_df, aes(x = idx)) +
-    geom_ribbon(aes(ymin = q05, ymax = q95), fill = "blue", alpha = 0.2) +
-    geom_ribbon(aes(ymin = q25, ymax = q75), fill = "blue", alpha = 0.3) +
-    geom_line(aes(y = q50), color = "blue") +
-    geom_point(aes(y = obs), size = 1, shape = 16) +
+  # Sort by x so lines connect correctly
+  pi_df <- pi_df[order(pi_df$x), ]
+
+  # Map fills/colors through aes() so legends auto-build
+  band_colors <- c("90% PI" = "#4C78A8", "50% PI" = "#1F4E79")
+  line_colors <- c("Median forecast" = "#0B2948", "Observed" = "black")
+
+  p2 <- ggplot(pi_df, aes(x = x)) +
+    geom_ribbon(aes(ymin = q05, ymax = q95, fill = "90% PI"), alpha = 0.25) +
+    geom_ribbon(aes(ymin = q25, ymax = q75, fill = "50% PI"), alpha = 0.45) +
+    geom_line(aes(y = q50, color = "Median forecast"), linewidth = 0.7) +
+    geom_point(aes(y = obs, color = "Observed"), size = 1.6, shape = 16, alpha = 0.85) +
+    scale_fill_manual(name = "Prediction interval", values = band_colors,
+                      breaks = c("90% PI", "50% PI")) +
+    scale_color_manual(name = NULL, values = line_colors,
+                       breaks = c("Median forecast", "Observed")) +
     labs(
-      x     = "Test Sample Index",
-      y     = "Precipitation (mm)",
-      title = sprintf("XGBoost Gamma %dd: Prediction Intervals (2025 test)", horizon)
+      x     = x_lab,
+      y     = "Cumulative precipitation (mm)",
+      title = sprintf("XGBoost Gamma %dd — Prediction Intervals (2025 test set)", horizon),
+      subtitle = sprintf("n = %d forecasts | 50%% and 90%% central credible bands", n_plot)
     ) +
-    theme_precip()
-  ggsave(paste0(prefix, "_intervals.png"), p2, width = 14, height = 5, dpi = 200)
+    theme_precip() +
+    theme(
+      legend.position = "bottom",
+      legend.box = "horizontal",
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "grey40"),
+      panel.grid.minor = element_blank()
+    )
+  if (has_dates) {
+    p2 <- p2 + scale_x_date(date_labels = "%b %Y", date_breaks = "1 month")
+  }
+  ggsave(paste0(prefix, "_intervals.png"), p2, width = 16, height = 6, dpi = 200)
 
 
   # --- 3. Feature Importance (gain-based, top 25) ---
   tryCatch({
-    imp <- xgb.importance(model = model)
+    imp <- xgb.importance(feature_names = feature_cols, model = model)
     imp <- imp[order(-Gain)][1:min(25, nrow(imp))]
     imp[, category := sapply(Feature, classify_feature)]
     imp[, Feature := factor(Feature, levels = rev(Feature))]
@@ -550,19 +677,88 @@ plot_diagnostics <- function(model, shape, test_df, feature_cols, horizon) {
   })
 
 
-  # --- 5. PIT Histogram ---
-  pit <- pgamma(y, shape = shape, rate = rate)
-  p5 <- ggplot(data.frame(pit = pit), aes(x = pit)) +
-    geom_histogram(aes(y = after_stat(density)), bins = 20,
-                   fill = "steelblue", alpha = 0.7, color = "black") +
-    geom_hline(yintercept = 1.0, color = "red", linetype = "dashed") +
+  # --- 5. PIT Histogram with uniformity band + KS test ---
+  pit_raw <- pgamma(y, shape = shape, rate = rate)
+  pit_raw <- pmin(pmax(pit_raw, 1e-6), 1 - 1e-6)
+  # If we have a recalibrator from val, apply its inverse to test PIT to
+  # produce the calibrated PIT (should look uniform if recalibration works).
+  pit_cal <- if (!is.null(recal)) {
+    # Recalibrated PIT = empirical CDF of val PIT applied to test raw PIT.
+    # Build ecdf from val PIT and evaluate at test raw PIT.
+    ecdf_val <- ecdf(pit_val)
+    ecdf_val(pit_raw)
+  } else {
+    NULL
+  }
+
+  pit_long <- if (!is.null(pit_cal)) {
+    data.frame(
+      pit   = c(pit_raw, pit_cal),
+      which = factor(rep(c("Variance-scaled only", "Quantile-recalibrated"),
+                         each = length(pit_raw)),
+                     levels = c("Variance-scaled only", "Quantile-recalibrated"))
+    )
+  } else {
+    data.frame(pit = pit_raw, which = factor("Variance-scaled only"))
+  }
+
+  # 95% pointwise binomial band for uniformity at the chosen bin count
+  n_bins <- 25
+  bin_width <- 1 / n_bins
+  n_obs <- length(pit_raw)
+  expected_count <- n_obs * bin_width
+  # Expected density = 1.0; binomial 95% band on density
+  band_lo_density <- qbinom(0.025, n_obs, bin_width) / (n_obs * bin_width)
+  band_hi_density <- qbinom(0.975, n_obs, bin_width) / (n_obs * bin_width)
+
+  # KS stat vs Uniform(0,1)
+  ks_raw <- suppressWarnings(ks.test(pit_raw, "punif"))
+  ks_lab_raw <- sprintf("KS=%.3f (p=%.3f)", ks_raw$statistic, ks_raw$p.value)
+  ks_lab_cal <- if (!is.null(pit_cal)) {
+    ks_c <- suppressWarnings(ks.test(pit_cal, "punif"))
+    sprintf("KS=%.3f (p=%.3f)", ks_c$statistic, ks_c$p.value)
+  } else NULL
+
+  annot_df <- if (!is.null(pit_cal)) {
+    data.frame(
+      which = factor(c("Variance-scaled only", "Quantile-recalibrated"),
+                     levels = c("Variance-scaled only", "Quantile-recalibrated")),
+      label = c(ks_lab_raw, ks_lab_cal)
+    )
+  } else {
+    data.frame(which = factor("Variance-scaled only"), label = ks_lab_raw)
+  }
+
+  p5 <- ggplot(pit_long, aes(x = pit)) +
+    annotate("rect", xmin = 0, xmax = 1,
+             ymin = band_lo_density, ymax = band_hi_density,
+             alpha = 0.15, fill = "grey40") +
+    geom_histogram(aes(y = after_stat(density)), bins = n_bins,
+                   fill = "#4C78A8", alpha = 0.85, color = "white") +
+    geom_hline(yintercept = 1.0, color = "#C1272D",
+               linetype = "dashed", linewidth = 0.6) +
+    geom_text(data = annot_df, aes(x = 0.02, y = Inf, label = label),
+              hjust = 0, vjust = 1.5, size = 3.3, color = "grey20") +
+    facet_wrap(~which, nrow = 1) +
     labs(
-      x     = "PIT Value",
+      x     = "PIT value",
       y     = "Density",
-      title = sprintf("XGBoost Gamma %dd: PIT Histogram (Calibration)", horizon)
+      title = sprintf("XGBoost Gamma %dd — PIT Histogram (2025 test set)", horizon),
+      subtitle = paste0(
+        "Grey band = 95% pointwise uniform envelope | ",
+        "dashed line = ideal density (1.0)"
+      )
     ) +
-    theme_precip()
-  ggsave(paste0(prefix, "_pit.png"), p5, width = 6, height = 4, dpi = 200)
+    theme_precip() +
+    theme(
+      plot.title = element_text(face = "bold"),
+      plot.subtitle = element_text(color = "grey40"),
+      strip.text = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    )
+
+  pit_width <- if (!is.null(pit_cal)) 11 else 6
+  ggsave(paste0(prefix, "_pit.png"), p5, width = pit_width, height = 4.5, dpi = 200)
 
 
   # --- 6. Reliability Diagram ---
@@ -662,6 +858,19 @@ main <- function() {
     model  <- result$model
     shape  <- result$shape
 
+    # Calibrate variance on validation set (mean-preserving scaling of Gamma)
+    cat("\nCalibrating (variance scaling on validation set)...\n")
+    X_val_m <- as.matrix(val_dt[, ..feature_cols])
+    colnames(X_val_m) <- feature_cols
+    mu_val  <- predict(model, xgb.DMatrix(X_val_m,
+                                          label = val_dt$ground_truth_precip))
+    rate_val <- shape / mu_val
+    scale_factor <- find_optimal_scale_factor(
+      y = val_dt$ground_truth_precip, shape = shape, rate = rate_val,
+      objective = "ks"  # minimise PIT KS distance from Uniform
+    )
+    cat(sprintf("  Optimal scale factor (KS-minimising): %.2f\n", scale_factor))
+
     # Evaluate on val and test
     cat("\nEvaluating...\n")
     for (split_info in list(
@@ -669,11 +878,13 @@ main <- function() {
       list(name = "test", dt = test_dt)
     )) {
       eval_result <- evaluate_model(
-        model, shape, split_info$dt, feature_cols, split_info$name
+        model, shape, split_info$dt, feature_cols, split_info$name,
+        scale_factor = scale_factor
       )
       m <- eval_result$metrics
       m$horizon_days <- horizon
       m$gamma_shape  <- shape
+      m$scale_factor <- scale_factor
       all_metrics[[length(all_metrics) + 1]] <- m
 
       cat(sprintf("\n  %s metrics:\n", toupper(split_info$name)))
@@ -695,7 +906,8 @@ main <- function() {
       # Diagnostic plots for test set
       if (split_info$name == "test") {
         cat("\n  Generating diagnostic plots...\n")
-        plot_diagnostics(model, shape, split_info$dt, feature_cols, horizon)
+        plot_diagnostics(model, shape, split_info$dt, feature_cols, horizon,
+                         scale_factor = scale_factor, val_df = val_dt)
       }
     }
 
@@ -706,8 +918,9 @@ main <- function() {
 
     # Save params + shape
     params_to_save <- result$params
-    params_to_save$gamma_shape <- shape
-    params_to_save$n_rounds    <- result$n_rounds
+    params_to_save$gamma_shape  <- shape
+    params_to_save$n_rounds     <- result$n_rounds
+    params_to_save$scale_factor <- scale_factor
     params_path <- file.path(MODELS_DIR,
                              sprintf("xgboost_gamma_%dd_params.json", horizon))
     writeLines(toJSON(params_to_save, auto_unbox = TRUE, pretty = TRUE),
@@ -729,5 +942,7 @@ main <- function() {
 }
 
 
-# Run
-main()
+# Run — only when invoked as a script (not when sourced for reuse)
+if (!exists("SKIP_MAIN") || !isTRUE(SKIP_MAIN)) {
+  main()
+}
