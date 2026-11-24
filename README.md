@@ -176,4 +176,4 @@ Full results with NLL, MAE, bias, and 50/60/70/80/90/95% prediction-interval cov
 
 ## License & contact
 
-Course project, Spring 2026. For questions, open an issue or contact justin@propagenticai.com.
+Course project, Spring 2026. For questions, open an issue or contact bjbonner23@gmail.com.
